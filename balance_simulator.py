@@ -1,0 +1,238 @@
+"""飛食 FlyEats 數值平衡模擬器。
+
+不呼叫 Streamlit / AI，純粹重複呼叫 app.py 的結算引擎（finalize_round）跑完整局，
+統計不同決策策略下的通關率，用於難度分層門檻校準。
+
+用法：
+    python balance_simulator.py
+"""
+import random
+import statistics
+
+import app as game
+
+CITIES = game.CITIES
+
+
+# ── 策略：決策產生函式 ──────────────────────────────────────────────────────
+# 每個策略函式簽名為 fn(state) -> list[dict]，回傳本回合要送進 finalize_round 的決策。
+# 必須自行確保：最多 2 項、總花費 <= state["money"]（模擬 UI 的驗證邏輯）。
+
+def _money_cap(state, max_amt=30):
+    """模擬 UI 滑桿：5 的倍數、不超過現有資金。"""
+    cap = max(5, int(state["money"] // 5) * 5)
+    return min(max_amt, cap)
+
+
+def strategy_random(state):
+    """純隨機：每回合隨機選 0-2 項決策、隨機城市/金額。"""
+    decisions = []
+    budget = state["money"]
+    n = random.randint(0, 2)
+    pool = ["subsidy", "marketing", "commission", "expansion", "upgrade", "acquisition", "none"]
+    for _ in range(n):
+        t = random.choice(pool)
+        if t in ("subsidy", "marketing"):
+            cap = _money_cap(state, 30)
+            if cap < 5 or budget < 5:
+                continue
+            amt = random.choice(range(5, cap + 1, 5))
+            if amt > budget:
+                continue
+            city = random.choice(CITIES)
+            decisions.append({"type": t, "city": city, "amount": amt})
+            budget -= amt
+        elif t == "commission":
+            decisions.append({"type": "commission", "delta": random.choice([-game.COMMISSION_STEP, game.COMMISSION_STEP])})
+        elif t == "expansion":
+            not_expanded = [c for c in CITIES if c not in state.get("expanded_cities", [])]
+            if not_expanded and budget >= game.EXPANSION_COST:
+                decisions.append({"type": "expansion", "city": random.choice(not_expanded)})
+                budget -= game.EXPANSION_COST
+        elif t == "upgrade":
+            upgs = state.get("upgrades", {})
+            catalog = [
+                ("aiRouting", game.UPGRADE_AI_ROUTING_COST),
+                ("dynamicPricing", game.UPGRADE_DYNAMIC_PRICING_COST),
+                ("exclusiveMerchant", game.UPGRADE_EXCLUSIVE_MERCHANT_COST),
+            ]
+            available = [(k, c) for k, c in catalog if not upgs.get(k) and budget >= c]
+            if available:
+                k, c = random.choice(available)
+                decisions.append({"type": "upgrade", "upgradeType": k})
+                budget -= c
+        elif t == "acquisition":
+            comp_money = state.get("competitor_money", game.COMPETITOR_INITIAL_MONEY)
+            if (not state.get("competitor_acquired") and not state.get("competitor_bankrupt")
+                    and comp_money <= game.ACQUISITION_THRESHOLD and budget >= game.ACQUISITION_COST):
+                decisions.append({"type": "acquisition"})
+                budget -= game.ACQUISITION_COST
+        if len(decisions) >= 2:
+            break
+    return decisions[:2]
+
+
+def strategy_single_city(city="台北"):
+    """單城集中：每回合全力補貼同一城市。"""
+    def fn(state):
+        amt = _money_cap(state, 30)
+        if amt < 5 or state["money"] < 5:
+            return []
+        return [{"type": "subsidy", "city": city, "amount": amt}]
+    return fn
+
+
+def strategy_distributed(state):
+    """分散投資：依回合數輪流補貼三城市。"""
+    city = CITIES[(state["round"] - 1) % len(CITIES)]
+    amt = _money_cap(state, 20)
+    if amt < 5 or state["money"] < 5:
+        return []
+    return [{"type": "subsidy", "city": city, "amount": amt}]
+
+
+def strategy_tech_then_harvest(state):
+    """先研發後收割：前 3 回合研發科技，之後重砸台北。"""
+    if state["round"] <= 3:
+        upgs = state.get("upgrades", {})
+        catalog = [
+            ("aiRouting", game.UPGRADE_AI_ROUTING_COST),
+            ("dynamicPricing", game.UPGRADE_DYNAMIC_PRICING_COST),
+            ("exclusiveMerchant", game.UPGRADE_EXCLUSIVE_MERCHANT_COST),
+        ]
+        available = [(k, c) for k, c in catalog if not upgs.get(k) and state["money"] >= c]
+        if available:
+            k, _ = available[0]
+            return [{"type": "upgrade", "upgradeType": k}]
+        return []
+    amt = _money_cap(state, 30)
+    if amt < 5 or state["money"] < 5:
+        return []
+    return [{"type": "subsidy", "city": "台北", "amount": amt}]
+
+
+def strategy_siege(city="台北"):
+    """圍剿對手：持續全力衝同一城市，目標是逼對手破產（搭配收購機會）。"""
+    def fn(state):
+        decisions = []
+        amt = _money_cap(state, 30)
+        if amt >= 5 and state["money"] >= 5:
+            decisions.append({"type": "subsidy", "city": city, "amount": amt})
+        comp_money = state.get("competitor_money", game.COMPETITOR_INITIAL_MONEY)
+        remaining_budget = state["money"] - (amt if decisions else 0)
+        if (not state.get("competitor_acquired") and not state.get("competitor_bankrupt")
+                and comp_money <= game.ACQUISITION_THRESHOLD and remaining_budget >= game.ACQUISITION_COST
+                and len(decisions) < 2):
+            decisions.append({"type": "acquisition"})
+        return decisions[:2]
+    return fn
+
+
+def strategy_balanced(state):
+    """兼顧滿意度：每 3 回合降一次抽成維持滿意度，其他回合補貼主力城市（同時使用 2 種決策類型）。"""
+    if state["round"] % 3 == 0 and state["commission_rate"] > game.COMMISSION_MIN:
+        return [{"type": "commission", "delta": -game.COMMISSION_STEP}]
+    amt = _money_cap(state, 25)
+    if amt < 5 or state["money"] < 5:
+        return []
+    return [{"type": "subsidy", "city": "台北", "amount": amt}]
+
+
+STRATEGIES = {
+    "純隨機":     strategy_random,
+    "單城集中":   strategy_single_city("台北"),
+    "分散投資":   strategy_distributed,
+    "先研發後收割": strategy_tech_then_harvest,
+    "圍剿對手":   strategy_siege("台北"),
+    "兼顧滿意度":  strategy_balanced,
+}
+
+
+# ── 模擬執行器 ──────────────────────────────────────────────────────────────
+
+def run_one_game(decision_fn, initial_money=120.0, max_rounds=10):
+    state = game.init_game_state(initial_money=initial_money)
+    state["max_rounds"] = max_rounds
+    bankrupt_round = None
+    for r in range(1, max_rounds + 1):
+        decisions = decision_fn(state)
+        # 預算保險：若策略不小心超支，砍到買得起為止（模擬 UI 擋下超支）
+        total_spend = 0.0
+        for d in decisions:
+            if d["type"] in ("subsidy", "marketing"):
+                total_spend += d.get("amount", 0)
+            elif d["type"] == "expansion":
+                total_spend += game.EXPANSION_COST
+            elif d["type"] == "upgrade":
+                costs = {
+                    "aiRouting": game.UPGRADE_AI_ROUTING_COST,
+                    "dynamicPricing": game.UPGRADE_DYNAMIC_PRICING_COST,
+                    "exclusiveMerchant": game.UPGRADE_EXCLUSIVE_MERCHANT_COST,
+                }
+                total_spend += costs[d["upgradeType"]]
+            elif d["type"] == "acquisition":
+                total_spend += game.ACQUISITION_COST
+        if total_spend > state["money"]:
+            decisions = []  # 超支就視為本回合不行動（保守處理）
+        state = game.finalize_round(state, decisions)
+        if bankrupt_round is None and state["money"] <= 0:
+            bankrupt_round = r
+        if state["game_result"] in ("win", "lose"):
+            break
+    max_share = max(cd["share"] for cd in state["cities"].values())
+    sat = game.calculate_overall_satisfaction(state)
+    return {
+        "result": state["game_result"],
+        "rounds_played": state["round"] - 1,
+        "final_money": state["money"],
+        "max_share": max_share,
+        "consumer_sat": sat["consumer"],
+        "rider_sat": sat["rider"],
+        "bankrupt_round": bankrupt_round,
+    }
+
+
+def run_trials(decision_fn, n_trials, **kwargs):
+    results = [run_one_game(decision_fn, **kwargs) for _ in range(n_trials)]
+    wins = sum(1 for r in results if r["result"] == "win")
+    early_bankrupt = sum(1 for r in results if r["bankrupt_round"] is not None and r["bankrupt_round"] <= 3)
+    avg_rounds = statistics.mean(r["rounds_played"] for r in results)
+    avg_money = statistics.mean(r["final_money"] for r in results)
+    avg_share = statistics.mean(r["max_share"] for r in results)
+    return {
+        "n": n_trials,
+        "win_rate": wins / n_trials,
+        "early_bankrupt_rate": early_bankrupt / n_trials,
+        "avg_rounds": avg_rounds,
+        "avg_final_money": avg_money,
+        "avg_max_share": avg_share,
+    }
+
+
+def print_report(title, strategy_results):
+    print(f"\n{'='*70}\n{title}\n{'='*70}")
+    print(f"{'策略':12s}  {'通關率':>8s}  {'3回合內破產':>10s}  {'平均回合':>8s}  {'平均資金':>10s}  {'平均最高市占':>10s}")
+    for name, r in strategy_results.items():
+        print(
+            f"{name:12s}  {r['win_rate']*100:7.1f}%  {r['early_bankrupt_rate']*100:9.1f}%  "
+            f"{r['avg_rounds']:8.1f}  {r['avg_final_money']:9.1f}萬  {r['avg_max_share']*100:9.1f}%"
+        )
+
+
+if __name__ == "__main__":
+    import sys
+    sys.stdout.reconfigure(encoding="utf-8")
+
+    N_RANDOM = 2000
+    N_DIRECTED = 500
+
+    results = {}
+    for name, fn in STRATEGIES.items():
+        n = N_RANDOM if name == "純隨機" else N_DIRECTED
+        results[name] = run_trials(fn, n)
+
+    print_report(
+        f"挑戰模式（現行全開版本，WIN_MONEY={game.WIN_MONEY:.0f}萬 / WIN_SHARE={game.WIN_SHARE*100:.0f}% / "
+        f"對手初始資金={game.COMPETITOR_INITIAL_MONEY:.0f}萬）",
+        results,
+    )

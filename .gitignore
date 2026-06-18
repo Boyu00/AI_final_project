@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# 虛擬環境
+venv/
+env/
+.venv/
+
+# 環境變數 / API 金鑰（絕對不進版本控制）
+.env
+api_key.txt
+
+# Streamlit
+.streamlit/
+
+# 作業系統
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 投影片 / 文件（課程用，非專題程式碼）
+*.pptx
+*.docx
+*.pdf
+
+# 臨時校準腳本
+_route_test.py
+
+# IDE
+.vscode/
+.idea/
+*.swp
