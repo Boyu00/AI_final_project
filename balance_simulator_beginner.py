@@ -65,10 +65,7 @@ def finalize_round_beginner(state, decisions):
             cd["share"] += (buf * game.MARKETING_EFFICIENCY) / cd["market"]
             cd["marketing_buffer"] = 0.0
 
-    # Step 2：擴張持續效果
-    for city, exp_round in ns["expansion_effects"].items():
-        if ns["round"] > exp_round:
-            ns["cities"][city]["share"] += game.EXPANSION_ONGOING
+    # Step 2：（擴張改為 market 成長，無持續 share 效果）
 
     prev_shares = {c: cd["share"] for c, cd in ns["cities"].items()}
 
@@ -102,11 +99,10 @@ def finalize_round_beginner(state, decisions):
             city = dec["city"]
             ns["money"] -= game.EXPANSION_COST
             ns["cities"][city]["share"] += game.EXPANSION_IMMEDIATE
-            ns["cities"][city]["consumer_satisfaction"] = max(0, ns["cities"][city]["consumer_satisfaction"] - 2)
-            ns["cities"][city]["rider_satisfaction"] = max(0, ns["cities"][city]["rider_satisfaction"] - 2)
+            if city not in ns.get("expanded_cities", []):
+                ns["cities"][city]["market"] = round(ns["cities"][city]["market"] * (1 + game.EXPANSION_MARKET_GROWTH))
             if city not in ns["expanded_cities"]:
                 ns["expanded_cities"].append(city)
-            ns["expansion_effects"][city] = state["round"]
 
     for cd in ns["cities"].values():
         cd["share"] = max(0.0, min(game.MAX_PLAYER_SHARE, cd["share"]))

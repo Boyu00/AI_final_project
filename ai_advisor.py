@@ -11,6 +11,7 @@ _BASE_PROMPT_TAIL = """
 - 使用繁體中文，語氣專業，引用台灣本地案例
 - 每個分析都要連結經濟學概念（雙邊市場、網路效應、補貼陷阱、損失厭惡、機會成本等）
 - 回答簡潔有力
+- 用詞規範：沉沒成本（不用「沈沒」）
 """
 
 
@@ -90,7 +91,7 @@ def build_system_prompt(config: dict | None) -> str:
         parts.append(
             "【黑天鵝隨機事件（每回合 40% 機率觸發）】\n"
             "- 好事：政府補貼（營收 ×1.5）、颱風效應（營收 ×1.4 但外送員 -8）、KOL 爆推（一城消費者 +20）、"
-            "騎手保障法（外送員 +12）、運動熱潮（補貼效率 ×1.3）\n"
+            "外送員保障法（外送員 +12）、運動熱潮（補貼效率 ×1.3）\n"
             "- 壞事：食安醜聞（消費者 -10）、燃油飆漲（外送員 -10，固定成本 +8 萬）、系統當機（一城收入歸零，消費者 -8）、景氣衰退（營收 ×0.7）\n"
             "- 好事（對對手）：送香公爆醜聞（送香公各城 -2% 市占）\n"
             "分析時請將當季黑天鵝納入解讀，說明它如何放大或削弱玩家決策效果。\n"
@@ -171,6 +172,16 @@ class AIAdvisor:
         while True:
             try:
                 return self._chat.send_message(prompt).text
+            except Exception as e:
+                if _is_quota_error(e) and self._try_fallback():
+                    continue
+                raise
+
+    def _send_fresh(self, prompt: str) -> str:
+        """不帶聊天歷史的單次呼叫（用於結局報告等長 prompt，避免累積歷史超出 context）。"""
+        while True:
+            try:
+                return self._model.generate_content(prompt).text
             except Exception as e:
                 if _is_quota_error(e) and self._try_fallback():
                     continue
@@ -454,12 +465,12 @@ class AIAdvisor:
             f"【整局決策紀錄】\n{data_block}"
         )
         try:
-            return self._send(prompt)
+            return self._send_fresh(prompt)
         except Exception:
             return "📚 本局決策概念對照表\n\n（生成失敗，可從上方各回合報告自行回顧決策與效果）"
 
-    def generate_ending_report(self, game_state: dict) -> str:
-        """產生遊戲結束總結報告（200-300 字）。"""
+    def generate_ending_report(self, game_state: dict, scoring: dict | None = None) -> str:
+        """產生遊戲結束總結報告（500-700 字）。scoring 為 determine_badges + calculate_grade 合併結果。"""
         result = game_state.get("game_result", "lose")
         history = game_state.get("history", [])
         cities = game_state["cities"]
@@ -476,36 +487,69 @@ class AIAdvisor:
             + (f", 黑天鵝：{h['swan_event']['name']}" if h.get("swan_event") else "")
             for h in history
         )
-        result_text = "勝利（Series A 融資通過）" if result == "win" else "失敗"
+        result_text = "勝利（Series A 融資通過）" if result == "win" else "失敗（未達標即結束）"
 
         swan_rounds = [h for h in history if h.get("swan_event")]
         swan_summary = "、".join(f"Q{h['round']}「{h['swan_event']['name']}」" for h in swan_rounds)
-        swan_note = f"\n本局共發生 {len(swan_rounds)} 次黑天鵝事件：{swan_summary}，請於關鍵轉折點分析中至少提及一次。" if swan_rounds else ""
+        swan_note = f"本局共發生 {len(swan_rounds)} 次黑天鵝事件：{swan_summary}。" if swan_rounds else "本局無黑天鵝事件。"
 
         config = game_state["config"]
-        _style_eval = "經營風格評估（特別分析消費者 vs 外送商家滿意度的平衡）" if config["dual_satisfaction"] else "經營風格評估"
         _sat_line = (
-            f"消費者滿意度：{c_sat:.1f}　外送商家滿意度：{r_sat:.1f}\n" if config["dual_satisfaction"]
-            else f"整體滿意度：{(c_sat+r_sat)/2:.1f}\n"
+            f"消費者滿意度：{c_sat:.1f}　外送商家滿意度：{r_sat:.1f}" if config["dual_satisfaction"]
+            else f"整體滿意度：{(c_sat+r_sat)/2:.1f}"
         )
 
+        # 升級與策略補充資訊
+        upgrades = game_state.get("upgrades", {})
+        upgrade_names = {"aiRouting": "AI 智慧路徑", "dynamicPricing": "動態定價", "exclusiveMerchant": "獨家聯盟"}
+        unlocked = [upgrade_names[k] for k in upgrades if upgrades[k] and k in upgrade_names]
+        upgrade_line = f"科技解鎖：{'、'.join(unlocked) if unlocked else '無'}"
+
+        expanded = game_state.get("expanded_cities", [])
+        expansion_line = f"已擴張城市：{'、'.join(expanded) if expanded else '無'}"
+
+        brand_count = game_state.get("brand_count", {})
+        brand_line = "品牌投資：" + "　".join(f"{c} ×{n}" for c, n in brand_count.items() if n > 0) if any(brand_count.values()) else "品牌投資：無"
+
+        # 依徽章調整報告語氣
+        from scoring import BADGE_TONES
+        _tone = BADGE_TONES.get(scoring.get("primary", ""), "") if scoring else ""
+        _tone_line = f"{_tone}\n\n" if _tone else ""
+
+        # 評分摘要（若有）
+        if scoring:
+            _score_line = (
+                f"【本局評分】\n"
+                f"策略徽章：{scoring.get('primary_icon','')} {scoring.get('primary','')}　"
+                f"副徽章：{scoring.get('secondary_icon','')} {scoring.get('secondary','無')}\n"
+                f"綜合評分：{scoring.get('grade','')} 級 {scoring.get('total',0):.0f} 分"
+                f"（效率 {scoring.get('efficiency',0):.0f}｜市場 {scoring.get('market',0):.0f}"
+                f"｜聲譽 {scoring.get('reputation',0):.0f}｜深度 {scoring.get('depth',0):.0f}）\n\n"
+            )
+        else:
+            _score_line = ""
+
         prompt = (
-            f"你是投資分析師，撰寫 200-300 字的 Series A 審查總結。\n"
-            f"包含：1){_style_eval} "
-            f"2)1-2個關鍵轉折點分析（含黑天鵝事件影響） 3)本局體現的經濟學概念清單\n"
-            f"用繁體中文。{swan_note}\n\n"
-            f"【結果】{result_text}\n"
-            f"最終資金：{game_state['money']:.1f} 萬\n"
-            f"台北市占：{cities['台北']['share']*100:.1f}%\n"
-            f"台中市占：{cities['台中']['share']*100:.1f}%\n"
-            f"高雄市占：{cities['高雄']['share']*100:.1f}%\n"
-            f"最高市占：{best_city} {max_share*100:.1f}%\n"
-            f"{_sat_line}"
-            f"抽成率：{game_state['commission_rate']*100:.0f}%\n\n"
+            f"{_tone_line}"
+            f"你是一位資深創投合夥人，正在撰寫飛食外送平台的 Series A 最終審查備忘錄。\n"
+            f"請用繁體中文撰寫 500-700 字的詳細評估報告，結構如下：\n\n"
+            f"**1. 本局總評**（2-3 句）：結果、整體風格定調（例：補貼驅動型、科技槓桿型、口碑穩健型）。\n"
+            f"**2. 經營軌跡分析**（150-200 字）：逐階段解析資金運用邏輯、市占累積節奏，{('分析消費者與外送商家滿意度的平衡取捨' if config['dual_satisfaction'] else '說明滿意度管理策略')}。\n"
+            f"**3. 關鍵轉折點**（150-200 字）：挑出 2-3 個最具決定性的回合，說明該決策為何影響走向。{swan_note}若有黑天鵝，分析玩家應對是否得當。\n"
+            f"**4. 本局體現的經濟學概念**（100-150 字）：條列 3-5 個本局實際發生的概念（如邊際效益遞減、網路效應、機會成本等），每項用一句話說明在哪個回合如何體現。\n"
+            f"**5. 給下一局的建議**（50-80 字）：針對本局最明顯的弱點，給出下局可改進的具體策略方向。\n\n"
+            f"【最終數據】\n"
+            f"結果：{result_text}\n"
+            f"最終資金：{game_state['money']:.1f} 萬　抽成率：{game_state['commission_rate']*100:.0f}%\n"
+            f"台北市占：{cities['台北']['share']*100:.1f}%　台中市占：{cities['台中']['share']*100:.1f}%　高雄市占：{cities['高雄']['share']*100:.1f}%\n"
+            f"{_sat_line}\n"
+            f"{upgrade_line}　{expansion_line}\n"
+            f"{brand_line}\n\n"
+            f"{_score_line}"
             f"【各回合紀錄】\n{history_text}"
         )
         try:
-            return self._send(prompt)
+            return self._send_fresh(prompt)
         except Exception as e:
             return (
                 f"（{'遊戲勝利！' if result == 'win' else '遊戲結束。'}"

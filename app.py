@@ -7,6 +7,7 @@ from datetime import datetime
 import streamlit as st
 from dotenv import load_dotenv
 from ai_advisor import AIAdvisor
+import scoring as sc
 
 load_dotenv()
 
@@ -31,8 +32,8 @@ FIXED_OPERATIONAL_COST   = 8.0    # 每回合固定維運死支（萬）
 NATURAL_DECAY_RATE       = 0.01   # 未投入城市每回合市占自然流失 1%
 CONSUMER_SAT_DECAY       = 3      # 未投入城市消費者滿意度自然衰減
 EXPANSION_COST           = 50     # 萬
-EXPANSION_IMMEDIATE      = 0.02
-EXPANSION_ONGOING        = 0.01
+EXPANSION_IMMEDIATE      = 0.02   # 即時市占增幅
+EXPANSION_MARKET_GROWTH  = 0.30   # 市場規模永久擴大 30%（對玩家與對手同時生效）
 COMMISSION_MIN           = 0.20
 COMMISSION_MAX           = 0.40
 COMMISSION_STEP          = 0.05
@@ -59,22 +60,22 @@ SWAN_EVENTS = [
         "id": "typhoon",
         "name": "🌀 颱風假宅在家效應",
         "tone": "mixed",
-        "description": "颱風來襲外出不便，外送需求暴增（營收 ×1.4），但騎手冒風險出勤怨聲載道（全台外送員滿意度 -8）。",
+        "description": "颱風來襲外出不便，外送需求暴增（營收 ×1.4），但外送員冒風險出勤怨聲載道（全台外送員滿意度 -8）。",
         "modifiers": {"revenue_multiplier": 1.4, "rider_sat_delta": -8},
     },
     {
         "id": "food_scandal",
-        "name": "🧪 外送食安醜聞",
+        "name": "🧪 外送食安風暴",
         "tone": "bad",
-        "description": "多家合作餐廳爆發食安問題，全台消費者信心大跌（消費者滿意度 -10）。",
-        "modifiers": {"consumer_sat_delta": -10},
+        "description": "多家外送平台合作餐廳集體爆發食安問題，全產業形象重創。飛食與送香公的消費者信心同步大跌（雙方消費者滿意度 -10）。",
+        "modifiers": {"consumer_sat_delta": -10, "competitor_sat_delta": -10},
     },
     {
         "id": "fuel_hike",
         "name": "⛽ 燃油價格飆漲",
         "tone": "bad",
-        "description": "國際油價暴衝，騎手怨聲載道（全台外送員滿意度 -10），本季額外維運成本 +8 萬。",
-        "modifiers": {"rider_sat_delta": -10, "fixed_cost_delta": 8},
+        "description": "國際油價暴衝，全行業外送員怨聲載道。飛食與送香公外送員滿意度同步暴跌（-10），飛食本季額外維運成本 +8 萬。",
+        "modifiers": {"rider_sat_delta": -10, "fixed_cost_delta": 8, "competitor_sat_delta": -10},
     },
     {
         "id": "viral_kol",
@@ -101,15 +102,22 @@ SWAN_EVENTS = [
         "id": "competitor_scandal",
         "name": "🔥 送香公爆勞資醜聞",
         "tone": "good",
-        "description": "競爭對手深陷騎手大規模抗議，各城市市占自動流失 2%，正是飛食反攻的好時機！",
-        "modifiers": {"competitor_share_delta": -0.02},
+        "description": "競爭對手深陷外送員大規模抗議，各城市市占自動流失 5%，正是飛食反攻的好時機！",
+        "modifiers": {"competitor_share_delta": -0.05},
     },
     {
         "id": "recession",
         "name": "📉 景氣衰退警報",
         "tone": "bad",
-        "description": "消費信心下滑，民眾縮衣節食，本季全台營收係數降至 ×0.7。",
-        "modifiers": {"revenue_multiplier": 0.7},
+        "description": "消費信心下滑，民眾縮衣節食，飛食本季全台營收係數降至 ×0.7。送香公同樣深陷消費者信心危機，雙方消費者滿意度同步下滑（-8）。",
+        "modifiers": {"revenue_multiplier": 0.7, "consumer_sat_delta": -8, "competitor_sat_delta": -8},
+    },
+    {
+        "id": "rider_exodus",
+        "name": "🏃 外送員大規模出走",
+        "tone": "bad",
+        "description": "外送行業工作條件惡化，大批外送員轉投物流或餐飲業。飛食與送香公外送員滿意度同步暴跌（-12），配送延誤也拖累雙方消費者體驗（-6）。",
+        "modifiers": {"rider_sat_delta": -12, "consumer_sat_delta": -6, "competitor_sat_delta": -12},
     },
     {
         "id": "sports_craze",
@@ -201,8 +209,8 @@ BRAND_MGMT_COST          = 15    # 萬（固定，不遞減）
 BRAND_MGMT_CONSUMER_SAT  = 8
 BRAND_MGMT_RIDER_SAT     = 4
 BRAND_MGMT_SHARE_GAIN    = 0.02  # 即時市占增幅
-BRAND_GROWTH_THRESHOLD   = 80    # 消費者滿意度觸發品牌成長門檻
-BRAND_GROWTH_RATE        = 0.03  # 品牌成長每回合自然市占增幅
+BRAND_GROWTH_THRESHOLD   = 75    # 消費者滿意度觸發品牌成長門檻
+BRAND_GROWTH_RATE        = 0.05  # 品牌成長每回合自然市占增幅
 BRAND_GROWTH_MIN_COUNT   = 2     # 解鎖品牌成長所需最低累積次數
 
 # 競爭對手財務常數
@@ -231,6 +239,13 @@ NETWORK_EFFECT_BONUS     = 0.15
 BRAND_PREMIUM_THRESHOLD  = 75     # 品牌溢價：消費者滿意度 ≥ 此值，該城營收 +10%
 BRAND_PREMIUM_BONUS      = 0.10
 FOCUS_STRATEGY_BONUS     = 0.15   # 集中化策略：本回合兩個決策同城時，雙方效率各 +15%
+AI_ROUTING_SHARE_THRESHOLD    = 0.35  # AI路由只在市占 < 此值的城市生效（中後期市場優勢消退）
+DYNAMIC_PRICING_SAT_THRESHOLD = 65    # 動態定價只在消費者滿意度 ≥ 此值的城市生效
+CITY_TRAITS = {
+    "台北": {"retaliation_mult": 1.2, "brand_growth_mult": 1.0, "subsidy_mult": 1.0},
+    "台中": {"retaliation_mult": 1.0, "brand_growth_mult": 1.5, "subsidy_mult": 1.0},
+    "高雄": {"retaliation_mult": 1.0, "brand_growth_mult": 1.0, "subsidy_mult": 1.3},
+}
 
 # ── 補貼連續遞減機制（修復「補貼+降抽成」固定排程 100% 必勝的平衡漏洞）─────────────
 # 邊際效益遞減從「tooltip 文字」變成真實機制：連續補貼同一城市，效率逐次遞減
@@ -262,6 +277,7 @@ DIFFICULTY_PRESETS = {
         "dynamic_retaliation": False, "fixed_retaliation_cost": 8.0, "fixed_retaliation_gain": 0.03,
         "investor_comment": False,
         "brand_management_enabled": False,
+        "expansion_enabled": False,
         "win_money": 120.0, "win_share": 0.55, "win_sat": 60.0,  # 單軌合併滿意度
         "win_required": 2, "win_total": 3,
     },
@@ -300,6 +316,7 @@ DIFFICULTY_PRESETS = {
 for _preset in DIFFICULTY_PRESETS.values():
     _preset.setdefault("network_effect", True)
     _preset.setdefault("brand_premium", True)
+    _preset.setdefault("expansion_enabled", True)
     _preset.setdefault("focus_strategy", True)
 
 # ── 教育模組：行為紀錄 + 概念提示 ───────────────────────────────────────────────
@@ -353,6 +370,7 @@ def get_concept_hint_text(decision_type: str, city: str | None, state: dict, con
             "decision_type": decision_type,
             "city": city or "global",
             "concept_id": hint_data["concept_id"],
+            "concept_name": hint_data["concept_name"],
             "opened": True,  # 滑鼠移過去即可看到，故曝光即計入
         })
         st.session_state[logged_key] = True
@@ -646,9 +664,9 @@ def resolve_competitor(state: dict) -> tuple:
             state["cities"][city]["share"] = min(MAX_PLAYER_SHARE, state["cities"][city]["share"] + drain * 0.5)
         return random.choice([
             f"💀【破產特報】{comp_name} 進入法院監管重整程序，各城市配送網路人心惶惶，大批商家主動尋求與飛食合作，本季市占全面萎縮。",
-            f"💀【重整觀察】{comp_name} 債務危機持續蔓延，留守騎手大規模跳槽，消費者口耳相傳平台服務惡化，飛食順勢接收流失客群。",
+            f"💀【重整觀察】{comp_name} 債務危機持續蔓延，留守外送員大規模跳槽，消費者口耳相傳平台服務惡化，飛食順勢接收流失客群。",
             f"💀【清算快訊】{comp_name} 資金鏈斷裂後無力維持補貼政策，各城市商家合約陸續到期不續簽，市場版圖迅速向飛食傾斜。",
-            f"💀【崩盤日誌】{comp_name} 旗下騎手大規模解約求去，留守團隊士氣低落，各城市訂單承接量跌至谷底，飛食趁勢接手失血版圖。",
+            f"💀【崩盤日誌】{comp_name} 旗下外送員大規模解約求去，留守團隊士氣低落，各城市訂單承接量跌至谷底，飛食趁勢接手失血版圖。",
             f"💀【殘局追蹤】{comp_name} 法務代理人宣布暫停對外簽約，合作餐廳紛紛轉投飛食懷抱，市場重組已成定局。",
         ]), 0.0
 
@@ -665,21 +683,26 @@ def resolve_competitor(state: dict) -> tuple:
             comp_money = state.get("competitor_money", COMPETITOR_INITIAL_MONEY)
 
             if config["dynamic_retaliation"]:
-                # 威脅等級：決定基礎花費與基礎市占回彈
-                if player_share >= 0.65:
-                    tier_label, base_cost, base_gain = "生死危機", 30.0, 0.12
-                elif player_share >= 0.50:
-                    tier_label, base_cost, base_gain = "嚴重威脅", 22.0, 0.08
-                elif player_share >= 0.35:
-                    tier_label, base_cost, base_gain = "中度威脅", 15.0, 0.05
+                # 威脅等級（6 級，挑戰模式）：決定基礎花費與基礎市占回彈
+                # 觸發門檻最高 40%——超過後對手已全力反撲，不再額外升級
+                if player_share >= 0.40:
+                    tier_label, base_cost, base_gain = "生死危機", 40.0, 0.33
+                elif player_share >= 0.34:
+                    tier_label, base_cost, base_gain = "嚴重威脅", 28.0, 0.26
+                elif player_share >= 0.28:
+                    tier_label, base_cost, base_gain = "重度威脅", 20.0, 0.19
+                elif player_share >= 0.23:
+                    tier_label, base_cost, base_gain = "中度威脅", 14.0, 0.13
+                elif player_share >= 0.20:
+                    tier_label, base_cost, base_gain = "中度警戒",  9.0, 0.08
                 else:
-                    tier_label, base_cost, base_gain = "輕度警戒",  8.0, 0.02
+                    tier_label, base_cost, base_gain = "輕度警戒",  5.0, 0.04
 
                 # 決戰期（Q8 起）對手傾盡全力反擊，預算與回彈上限同步上修
                 _endgame = state["round"] >= 8
-                _endgame_mult = 1.4 if _endgame else 1.0
+                _endgame_mult = 1.2 if _endgame else 1.0
                 base_cost *= _endgame_mult
-                gain_cap = 0.16 if _endgame else 0.12
+                gain_cap = 0.30 if _endgame else 0.25  # v1.26：降低上限使 70% 市占在數學上可達成
             else:
                 # 固定反擊（入門/標準模式）：強度固定，不隨威脅等級或回合 escalate
                 tier_label = "防守反擊"
@@ -693,6 +716,8 @@ def resolve_competitor(state: dict) -> tuple:
             actual_cost = round(min(base_cost, affordable), 1)
             ratio = (actual_cost / base_cost) if base_cost > 0 else 0.0
             actual_gain = min(round(base_gain * _endgame_mult * ratio, 4), gain_cap)
+            actual_gain = max(0.0, actual_gain - 0.03)
+            actual_gain *= CITY_TRAITS.get(city, {}).get("retaliation_mult", 1.0)
 
             player_pct = player_share * 100
             gain_pct = actual_gain * 100
@@ -725,7 +750,7 @@ def resolve_competitor(state: dict) -> tuple:
                 f"⚔️【{tier_label}】飛食{city}市占突破 {player_pct:.0f}%，觸動{comp_name}警戒紅線！總部緊急授權砸下 {actual_cost:.0f} 萬護盤預算，展開大規模補貼閃電戰，強行將流失客群拉回，{city}市占回升 {gain_pct:.0f}%。{finance_note}",
                 f"⚔️【{tier_label}】{comp_name}{city}大區主管緊急召開應對會議——飛食已滲透至 {player_pct:.0f}% 市占，威脅核心版圖。本季動用 {actual_cost:.0f} 萬專項防守基金，對商家祭出獨家返利方案，{city}市占強行鞏固 +{gain_pct:.0f}%。{finance_note}",
                 f"⚔️【{tier_label}】偵測到飛食在{city}市占飆至 {player_pct:.0f}%，{comp_name}高層拍板啟動「{plan}」，投入 {actual_cost:.0f} 萬進行全城補貼轟炸，{city}市占強拉 +{gain_pct:.0f}%。{finance_note}",
-                f"⚔️【{tier_label}】{comp_name}即時情報系統偵測飛食{city}突破 {player_pct:.0f}%，五分鐘內完成「{plan}」授權，{actual_cost:.0f} 萬資金立刻到位，全城騎手啟動加碼激勵，{city}市占回彈 +{gain_pct:.0f}%。{finance_note}",
+                f"⚔️【{tier_label}】{comp_name}即時情報系統偵測飛食{city}突破 {player_pct:.0f}%，五分鐘內完成「{plan}」授權，{actual_cost:.0f} 萬資金立刻到位，全城外送員啟動加碼激勵，{city}市占回彈 +{gain_pct:.0f}%。{finance_note}",
                 f"⚔️【{tier_label}】面對飛食{city} {player_pct:.0f}%市占威脅，{comp_name}戰略部啟動「{plan}」，動員 {actual_cost:.0f} 萬在{city}各大商圈密集投放優惠券，部分動搖中的合作餐廳被拉回{comp_name}陣營，{city}市占硬守回升 +{gain_pct:.0f}%。{finance_note}",
                 f"⚔️【{tier_label}】{comp_name}執行長親批「{plan}」，授權{city}地區主管動用 {actual_cost:.0f} 萬進行精準補貼阻擊——飛食用戶每筆訂單立享折抵，商家端提前鎖單獨家協議，{city}市占保住並反彈 +{gain_pct:.0f}%。{finance_note}",
             ]), actual_cost
@@ -765,11 +790,11 @@ def resolve_competitor(state: dict) -> tuple:
     state["competitor"][best_city] = min(state["competitor"][best_city] + 0.01, 0.60)
     state["cities"][best_city]["share"] = max(0.0, state["cities"][best_city]["share"] - 0.01)
     return random.choice([
-        f"ℹ️【例行公告】{comp_name}本季維持穩健經營策略，持續深耕旗下最強根據地{best_city}，投入{budget_desc}進行常態化社群維繫與騎手激勵，{best_city}市占微幅成長 1%，整體態勢平穩。",
+        f"ℹ️【例行公告】{comp_name}本季維持穩健經營策略，持續深耕旗下最強根據地{best_city}，投入{budget_desc}進行常態化社群維繫與外送員激勵，{best_city}市占微幅成長 1%，整體態勢平穩。",
         f"ℹ️【產業觀察】在無重大威脅的情況下，{comp_name}選擇以守代攻，將本季資源集中投注於{best_city}，以{budget_desc}維持成本換取 1% 的穩定市占增長。",
         f"ℹ️【業務更新】{comp_name}啟動「{plan}」，{best_city}團隊花費{budget_desc}推進商家關係維護與舊用戶回購活動，{best_city}市占穩步上揚 1%，基本盤依舊穩固。",
         f"ℹ️【穩盤快報】{comp_name}本季無意主動進攻，「{plan}」默默在{best_city}收攏老用戶，投入{budget_desc}的維運支出換得 +1% 市占，不張揚卻紮實。",
-        f"ℹ️【經營週報】{comp_name}{best_city}分部本季執行「{plan}」——{budget_desc}資金分散用於騎手福利加碼與商家續約補貼，{best_city}市占有驚無險地微增 1%。",
+        f"ℹ️【經營週報】{comp_name}{best_city}分部本季執行「{plan}」——{budget_desc}資金分散用於外送員福利加碼與商家續約補貼，{best_city}市占有驚無險地微增 1%。",
         f"ℹ️【季報摘要】無強敵威脅，{comp_name}選擇以最小成本鞏固{best_city}優勢地位，「{plan}」僅動用{budget_desc}便完成目標：市占 +1%，現金流保持健康。",
     ]), COST_COMPETITOR_NATURAL
 
@@ -790,22 +815,27 @@ def finalize_round(state: dict, decisions: list) -> dict:
     if active_event:
         mods = active_event.get("modifiers", {})
         affected_city = active_event.get("affected_city")
-        # 即時效果：滿意度
-        if "consumer_sat_delta" in mods:
-            for cd in ns["cities"].values():
-                cd["consumer_satisfaction"] = max(0, min(100, cd["consumer_satisfaction"] + mods["consumer_sat_delta"]))
-        if "rider_sat_delta" in mods:
-            for cd in ns["cities"].values():
-                cd["rider_satisfaction"] = max(0, min(100, cd["rider_satisfaction"] + mods["rider_sat_delta"]))
-        # 即時效果：隨機城市消費者
-        if "random_city_consumer_delta" in mods and affected_city:
-            ns["cities"][affected_city]["consumer_satisfaction"] = max(
-                0, min(100, ns["cities"][affected_city]["consumer_satisfaction"] + mods["random_city_consumer_delta"])
-            )
-        # 即時效果：對手市占流失
-        if "competitor_share_delta" in mods:
-            for city in CITIES:
-                ns["competitor"][city] = max(0.0, ns["competitor"][city] + mods["competitor_share_delta"])
+        # 即時效果已在 _roll_swan_event 套用，此處只處理延遲效果
+        if not active_event.get("immediate_applied"):
+            # 舊存檔相容：若未標記則補套用
+            if "consumer_sat_delta" in mods:
+                for cd in ns["cities"].values():
+                    cd["consumer_satisfaction"] = max(0, min(100, cd["consumer_satisfaction"] + mods["consumer_sat_delta"]))
+            if "rider_sat_delta" in mods:
+                for cd in ns["cities"].values():
+                    cd["rider_satisfaction"] = max(0, min(100, cd["rider_satisfaction"] + mods["rider_sat_delta"]))
+            if "random_city_consumer_delta" in mods and affected_city:
+                ns["cities"][affected_city]["consumer_satisfaction"] = max(
+                    0, min(100, ns["cities"][affected_city]["consumer_satisfaction"] + mods["random_city_consumer_delta"])
+                )
+            if "competitor_share_delta" in mods:
+                for city in CITIES:
+                    ns["competitor"][city] = max(0.0, ns["competitor"][city] + mods["competitor_share_delta"])
+            if "competitor_sat_delta" in mods:
+                for city in CITIES:
+                    ns["competitor_satisfaction"][city] = max(
+                        0.0, min(100.0, ns["competitor_satisfaction"][city] + mods["competitor_sat_delta"])
+                    )
         # 延遲效果：收入/補貼乘數與固定成本
         _event_revenue_mult     = mods.get("revenue_multiplier", 1.0)
         _event_sub_eff_mult     = mods.get("subsidy_efficiency_multiplier", 1.0)
@@ -820,21 +850,17 @@ def finalize_round(state: dict, decisions: list) -> dict:
             _mkt_cd["consecutive_marketing_count"] = _mkt_cd.get("consecutive_marketing_count", 0) + 1
         else:
             _mkt_cd["consecutive_marketing_count"] = 0
-    for cd in ns["cities"].values():
+    for city, cd in ns["cities"].items():
         buf = cd.get("marketing_buffer", 0.0)
         if buf > 0:
-            _mkt_eff = MARKETING_EFFICIENCY * (1.25 if ns["upgrades"].get("aiRouting") else 1.0) * _event_sub_eff_mult
+            _mkt_ai = ns["upgrades"].get("aiRouting") and cd["share"] < AI_ROUTING_SHARE_THRESHOLD
+            _mkt_eff = MARKETING_EFFICIENCY * (1.25 if _mkt_ai else 1.0) * _event_sub_eff_mult
             if config["network_effect"] and cd["share"] >= NETWORK_EFFECT_THRESHOLD:
                 _mkt_eff *= (1 + NETWORK_EFFECT_BONUS)
             _mkt_decay = get_subsidy_decay(cd.get("consecutive_marketing_count", 1))
             _mkt_gain = min((buf * _mkt_eff * _mkt_decay) / cd["market"], MARKETING_GAIN_CAP)
             cd["share"] += _mkt_gain
             cd["marketing_buffer"] = 0.0
-
-    # Step 2：擴張持續效果（每後續回合 +1%）
-    for city, exp_round in ns["expansion_effects"].items():
-        if ns["round"] > exp_round:
-            ns["cities"][city]["share"] += EXPANSION_ONGOING
 
     # Step 2.5：品牌成長觸發（消費者滿意度 ≥ 80 且累積品牌經營 ≥ 2 次 → 每回合自然 +3%）
     _brand_growth_cities = []
@@ -843,7 +869,8 @@ def finalize_round(state: dict, decisions: list) -> dict:
         for _bg_city, _bg_cd in ns["cities"].items():
             if (_bg_cd["consumer_satisfaction"] >= BRAND_GROWTH_THRESHOLD and
                     ns["brand_count"].get(_bg_city, 0) >= BRAND_GROWTH_MIN_COUNT):
-                _bg_cd["share"] = min(MAX_PLAYER_SHARE, _bg_cd["share"] + BRAND_GROWTH_RATE)
+                _bg_rate = BRAND_GROWTH_RATE * CITY_TRAITS.get(_bg_city, {}).get("brand_growth_mult", 1.0)
+                _bg_cd["share"] = min(MAX_PLAYER_SHARE, _bg_cd["share"] + _bg_rate)
                 _brand_growth_cities.append(_bg_city)
 
     # 記錄決策前市占（供競爭 AI 使用）
@@ -870,7 +897,9 @@ def finalize_round(state: dict, decisions: list) -> dict:
         if dtype == "subsidy":
             city, amount = dec["city"], dec["amount"]
             subsidized_cities.add(city)
-            _sub_eff = SUBSIDY_EFFICIENCY * (1.25 if ns["upgrades"].get("aiRouting") else 1.0) * _event_sub_eff_mult
+            _sub_ai = ns["upgrades"].get("aiRouting") and ns["cities"][city]["share"] < AI_ROUTING_SHARE_THRESHOLD
+            _sub_eff = SUBSIDY_EFFICIENCY * (1.25 if _sub_ai else 1.0) * _event_sub_eff_mult
+            _sub_eff *= CITY_TRAITS.get(city, {}).get("subsidy_mult", 1.0)
             _sub_eff *= get_subsidy_decay(ns["cities"][city]["consecutive_subsidy_count"])
             if config["network_effect"] and ns["cities"][city]["share"] >= NETWORK_EFFECT_THRESHOLD:
                 _sub_eff *= (1 + NETWORK_EFFECT_BONUS)
@@ -928,11 +957,11 @@ def finalize_round(state: dict, decisions: list) -> dict:
             ns["money"] -= EXPANSION_COST
             _exp_gain = EXPANSION_IMMEDIATE * (1 + FOCUS_STRATEGY_BONUS) if _focus_city == city else EXPANSION_IMMEDIATE
             ns["cities"][city]["share"] += _exp_gain
-            ns["cities"][city]["consumer_satisfaction"] = max(0, ns["cities"][city]["consumer_satisfaction"] - 2)
-            ns["cities"][city]["rider_satisfaction"]    = max(0, ns["cities"][city]["rider_satisfaction"]    - 2)
+            # 市場做大：雙方共用同一 market 數值，對手營收也同步受益
+            if city not in ns.get("expanded_cities", []):
+                ns["cities"][city]["market"] = round(ns["cities"][city]["market"] * (1 + EXPANSION_MARKET_GROWTH))
             if city not in ns["expanded_cities"]:
                 ns["expanded_cities"].append(city)
-            ns["expansion_effects"][city] = state["round"]
 
     # Step 3 結束後立即夾住單一平台市占上限（避免疊加多項決策後暫時超過上限，
     # 導致後續對手 AI 文案或畫面顯示出不合理的數字，如「市占飆至 164%」）
@@ -988,10 +1017,12 @@ def finalize_round(state: dict, decisions: list) -> dict:
 
     # Steps 4 & 5：計算收入（外送荒城市歸零）並扣除固定維運成本；含品牌溢價
     revenue = 0.0
-    _rev_coef = REVENUE_COEFFICIENT * (1.15 if ns["upgrades"].get("dynamicPricing") else 1.0) * _event_revenue_mult
+    _rev_coef = REVENUE_COEFFICIENT * _event_revenue_mult
     for city, cd in ns["cities"].items():
         if city not in crisis_cities and city != _event_outage_city:
             _city_rev_coef = _rev_coef
+            if ns["upgrades"].get("dynamicPricing") and cd["consumer_satisfaction"] >= DYNAMIC_PRICING_SAT_THRESHOLD:
+                _city_rev_coef *= 1.15
             if config["brand_premium"] and cd["consumer_satisfaction"] >= BRAND_PREMIUM_THRESHOLD:
                 _city_rev_coef *= (1 + BRAND_PREMIUM_BONUS)
             revenue += cd["market"] * cd["share"] * ns["commission_rate"] * _city_rev_coef
@@ -1142,11 +1173,13 @@ def show_city_cards(state: dict):
         r_icon = "😊" if r_sat >= 75 else ("😐" if r_sat >= 50 else "😠")
         shortage_warn = config["rider_crisis"] and r_sat < RIDER_SHORTAGE_THRESHOLD
         with cols[i]:
-            st.markdown(f"**🏙️ {city}**　市場規模 {cd['market']}")
+            _city_trait_label = {"台北": "⚔️ 激烈競爭", "台中": "🌱 口碑成長", "高雄": "💰 補貼高效"}.get(city, "")
+            st.markdown(f"**🏙️ {city}**　市場規模 {cd['market']}　`{_city_trait_label}`")
             _mkt_buf = cd.get("marketing_buffer", 0.0)
             if _mkt_buf > 0:
                 _ai_routing_buf = state.get("upgrades", {}).get("aiRouting", False)
-                _mkt_eff_preview = MARKETING_EFFICIENCY * (1.25 if _ai_routing_buf else 1.0)
+                _ai_routing_buf_active = _ai_routing_buf and state["cities"][city]["share"] < AI_ROUTING_SHARE_THRESHOLD
+                _mkt_eff_preview = MARKETING_EFFICIENCY * (1.25 if _ai_routing_buf_active else 1.0)
                 _expected_gain = (_mkt_buf * _mkt_eff_preview) / cd["market"]
                 st.info(f"📣 行銷緩衝待生效：{_mkt_buf:.0f} 萬　下回合預期市占 +{_expected_gain*100:.2f}%")
             if shortage_warn:
@@ -1189,7 +1222,7 @@ def show_city_cards(state: dict):
                 if _bc > 0:
                     _can_grow = cd["consumer_satisfaction"] >= BRAND_GROWTH_THRESHOLD and _bc >= BRAND_GROWTH_MIN_COUNT
                     _growth_icon = "🚀" if _can_grow else "🏷️"
-                    _growth_note = "　成長飛輪啟動！+3%/季" if _can_grow else ""
+                    _growth_note = f"　成長飛輪啟動！+{BRAND_GROWTH_RATE*100:.0f}%/季" if _can_grow else ""
                     st.caption(f"{_growth_icon} 品牌累積 {_bc} 次{_growth_note}")
 
 
@@ -1497,7 +1530,10 @@ def show_sidebar(state: dict):
 # ── UI：MARKET_NEWS 階段 ──────────────────────────────────────────────────────
 
 def _roll_swan_event(state: dict) -> dict | None:
-    """每回合第一次進入 MARKET_NEWS 時抽一次黑天鵝，結果存入 state。"""
+    """每回合第一次進入 MARKET_NEWS 時抽一次黑天鵝，結果存入 state。
+    滿意度與對手市占等即時效果在此直接套用，讓城市卡片即時反映；
+    revenue/補貼乘數等延遲效果留給 finalize_round 處理。
+    """
     if state.get("event_rolled_round") == state["round"]:
         return state.get("pending_event")  # 已抽過，回傳快取
     event = None
@@ -1511,6 +1547,27 @@ def _roll_swan_event(state: dict) -> dict | None:
         event["description"] = event["description"].replace(
             "{city}", event.get("affected_city", "")
         )
+        # ── 即時效果：立刻套用到 state，讓城市卡片即時反映
+        affected_city = event.get("affected_city")
+        if "consumer_sat_delta" in mods:
+            for cd in state["cities"].values():
+                cd["consumer_satisfaction"] = max(0, min(100, cd["consumer_satisfaction"] + mods["consumer_sat_delta"]))
+        if "rider_sat_delta" in mods:
+            for cd in state["cities"].values():
+                cd["rider_satisfaction"] = max(0, min(100, cd["rider_satisfaction"] + mods["rider_sat_delta"]))
+        if "random_city_consumer_delta" in mods and affected_city:
+            state["cities"][affected_city]["consumer_satisfaction"] = max(
+                0, min(100, state["cities"][affected_city]["consumer_satisfaction"] + mods["random_city_consumer_delta"])
+            )
+        if "competitor_share_delta" in mods:
+            for city in CITIES:
+                state["competitor"][city] = max(0.0, state["competitor"][city] + mods["competitor_share_delta"])
+        if "competitor_sat_delta" in mods:
+            for city in CITIES:
+                state["competitor_satisfaction"][city] = max(
+                    0.0, min(100.0, state["competitor_satisfaction"][city] + mods["competitor_sat_delta"])
+                )
+        event["immediate_applied"] = True  # 標記已套用，finalize_round 跳過
     state["pending_event"] = event
     state["event_rolled_round"] = state["round"]
     return event
@@ -1587,17 +1644,20 @@ def show_decision_phase(state: dict):
     # 金額上限：不超過現有資金（最少 5 萬）
     money_cap = max(5, int(state["money"] // 5) * 5)
 
-    # AI 路由效率加成（若已解鎖）
+    # AI 路由效率加成（若已解鎖；需市占 < 35% 才生效，城市條件在各 expander 內計算）
     _ai_routing = state.get("upgrades", {}).get("aiRouting", False)
-    _sub_eff = SUBSIDY_EFFICIENCY  * (1.25 if _ai_routing else 1.0)
-    _mkt_eff = MARKETING_EFFICIENCY * (1.25 if _ai_routing else 1.0)
-    _ai_note = "　✨AI路由 +25%" if _ai_routing else ""
+    _sub_eff = SUBSIDY_EFFICIENCY    # 城市條件版本在補貼 expander 內更新
+    _mkt_eff = MARKETING_EFFICIENCY  # 城市條件版本在行銷 expander 內更新
 
     # 先讀取上一輪渲染的 checkbox 狀態，用於計算剩餘額度和 disabled 邏輯
     _sub_checked   = bool(st.session_state.get("use_sub",   False))
     _mkt_checked   = bool(st.session_state.get("use_mkt",   False))
     _brand_checked = bool(st.session_state.get("use_brand", False)) if state["config"].get("brand_management_enabled") else False
-    _outside_chosen = int(_sub_checked) + int(_mkt_checked) + int(_brand_checked)
+    _comm_at_min   = commission_pct <= int(COMMISSION_MIN * 100)
+    _comm_at_max   = commission_pct >= int(COMMISSION_MAX * 100)
+    _comm_checked  = bool(st.session_state.get("use_comm", False)) and not (_comm_at_min or _comm_at_max)
+    _exp_checked   = bool(st.session_state.get("use_exp",  False)) and bool([c for c in CITIES if c not in state["expanded_cities"]]) and state["config"].get("expansion_enabled", True)
+    _outside_chosen = int(_sub_checked) + int(_mkt_checked) + int(_brand_checked) + int(_comm_checked) + int(_exp_checked)
     _remaining = max(0, 2 - _outside_chosen)
     _form_disabled = (_remaining <= 0)
 
@@ -1608,19 +1668,27 @@ def show_decision_phase(state: dict):
         with st.expander("💰 補貼（即時市占 + 滿意度）", expanded=True):
             # 額度提示：另一個外部決策（行銷）已勾且額度滿，阻止再勾
             if _form_disabled and not _sub_checked:
-                st.warning("🔒 決策額度已滿（2/2）——取消行銷才能改選補貼")
+                st.warning("🔒 決策額度已滿（2/2）——請先取消已選的其他決策")
             elif _mkt_checked and not _sub_checked:
                 st.caption("⚠️ 行銷已佔 1 格，勾選後額度將用完（表單內選項會鎖定）")
             else:
                 st.caption(f"剩餘決策額度：**{_remaining} / 2**")
+            _sub_hint = get_concept_hint_text("subsidy", CITIES[0], state)
             st.checkbox("執行補貼", key="use_sub",
-                        disabled=(_form_disabled and not _sub_checked))
+                        disabled=(_form_disabled and not _sub_checked),
+                        help=_sub_hint)
             sub_city = st.selectbox("目標城市", CITIES, key="sub_city")
-            _sub_hint = get_concept_hint_text("subsidy", sub_city, state)
-            sub_amt = st.slider("金額（萬）", min_value=5, max_value=money_cap, value=10, step=5, key="sub_amt", help=_sub_hint)
+            _sub_ai_active  = _ai_routing and state["cities"][sub_city]["share"] < AI_ROUTING_SHARE_THRESHOLD
+            _sub_city_mult  = CITY_TRAITS.get(sub_city, {}).get("subsidy_mult", 1.0)
+            _sub_eff        = SUBSIDY_EFFICIENCY * (1.25 if _sub_ai_active else 1.0) * _sub_city_mult
+            _sub_note_parts = []
+            if _sub_ai_active:        _sub_note_parts.append("✨AI智慧派單：演算法精準配對訂單，補貼每元轉化的市占 +25%")
+            if _sub_city_mult != 1.0: _sub_note_parts.append(f"🏙️{sub_city}加成 ×{_sub_city_mult}")
+            _sub_ai_note    = ("　" + "　".join(_sub_note_parts)) if _sub_note_parts else ""
+            sub_amt = st.slider("金額（萬）", min_value=5, max_value=money_cap, value=10, step=5, key="sub_amt")
             _sub_decay = get_subsidy_decay(state["cities"][sub_city].get("consecutive_subsidy_count", 0) + 1)
             sub_gain = (sub_amt * _sub_eff * _sub_decay) / CITY_META[sub_city]["market"]
-            st.caption(f"市占 **+{sub_gain*100:.2f}%**{_ai_note}　👤 補貼降低消費門檻，點餐意願上升 +5　🛵 訂單量增加，接單收入微幅提升 +1")
+            st.caption(f"市占 **+{sub_gain*100:.2f}%**{_sub_ai_note}　👤 補貼活動拉低消費者下單門檻，平台黏著度上升，消費者滿意度 +5　🛵 補貼帶動訂單量成長，外送員接單機會增加，外送員滿意度 +1")
             if _sub_decay < 1.0:
                 st.warning(f"⚠️ {sub_city}已連續補貼，本次效率只剩 {_sub_decay*100:.0f}%——換個城市效率會更高")
 
@@ -1628,18 +1696,22 @@ def show_decision_phase(state: dict):
     with col_b:
         with st.expander("📣 行銷投放（下回合市占生效，轉化率比補貼高 1.5 倍）", expanded=True):
             if _form_disabled and not _mkt_checked:
-                st.warning("🔒 決策額度已滿（2/2）——取消補貼才能改選行銷")
+                st.warning("🔒 決策額度已滿（2/2）——請先取消已選的其他決策")
             elif _sub_checked and not _mkt_checked:
                 st.caption("⚠️ 補貼已佔 1 格，勾選後額度將用完（表單內選項會鎖定）")
             else:
                 st.caption(f"剩餘決策額度：**{_remaining} / 2**")
+            _mkt_hint = get_concept_hint_text("marketing", CITIES[0], state)
             st.checkbox("執行行銷", key="use_mkt",
-                        disabled=(_form_disabled and not _mkt_checked))
+                        disabled=(_form_disabled and not _mkt_checked),
+                        help=_mkt_hint)
             mkt_city = st.selectbox("目標城市", CITIES, key="mkt_city")
-            _mkt_hint = get_concept_hint_text("marketing", mkt_city, state)
-            mkt_amt = st.slider("金額（萬）", min_value=5, max_value=money_cap, value=10, step=5, key="mkt_amt", help=_mkt_hint)
+            _mkt_ai_active = _ai_routing and state["cities"][mkt_city]["share"] < AI_ROUTING_SHARE_THRESHOLD
+            _mkt_eff       = MARKETING_EFFICIENCY * (1.25 if _mkt_ai_active else 1.0)
+            _mkt_ai_note   = "　✨AI智慧派單：演算法優化配送，廣告每元轉化的市占 +25%" if _mkt_ai_active else ""
+            mkt_amt = st.slider("金額（萬）", min_value=5, max_value=money_cap, value=10, step=5, key="mkt_amt")
             mkt_gain = (mkt_amt * _mkt_eff) / CITY_META[mkt_city]["market"]
-            st.caption(f"下回合市占 **+{mkt_gain*100:.2f}%**{_ai_note}（延遲生效，同額比補貼多 {(MARKETING_EFFICIENCY/SUBSIDY_EFFICIENCY - 1)*100:.0f}%）")
+            st.caption(f"廣告觸及潛在消費者，品牌知名度與下單轉換率提升，效果下回合實現（延遲生效）　→ 下回合市占 **+{mkt_gain*100:.2f}%**{_mkt_ai_note}")
 
     # ── 品牌經營（在 form 外，城市選擇器需即時重繪）
     if state["config"].get("brand_management_enabled"):
@@ -1668,28 +1740,30 @@ def show_decision_phase(state: dict):
             _can_grow = _c_sat >= BRAND_GROWTH_THRESHOLD and _bc >= BRAND_GROWTH_MIN_COUNT
             if _can_grow:
                 st.success(
-                    f"🚀 品牌成長飛輪已啟動！{brand_city_sel}消費者滿意度 {_c_sat:.0f} ≥ {BRAND_GROWTH_THRESHOLD}"
-                    f" 且累積 {_bc} 次，每回合自動 +{BRAND_GROWTH_RATE*100:.0f}% 市占"
+                    f"🚀 {brand_city_sel}品牌飛輪啟動——消費者口碑持續擴散，每回合自動 +{BRAND_GROWTH_RATE*100:.0f}% 市占"
                 )
             elif _bc >= BRAND_GROWTH_MIN_COUNT:
                 st.info(
-                    f"⏳ 品牌基礎建立中（{_bc} 次），消費者滿意度 {_c_sat:.1f}"
-                    f" → 需達 {BRAND_GROWTH_THRESHOLD} 觸發自然成長（+{BRAND_GROWTH_RATE*100:.0f}%/季）"
+                    f"⏳ {brand_city_sel}品牌基礎已建立——消費者滿意度再提升至 {BRAND_GROWTH_THRESHOLD}"
+                    f" 即可觸發每季自動 +{BRAND_GROWTH_RATE*100:.0f}% 市占（目前 {_c_sat:.1f}，差 {BRAND_GROWTH_THRESHOLD - _c_sat:.1f} 點）"
                 )
             else:
+                _remaining_inv = BRAND_GROWTH_MIN_COUNT - _bc
                 st.caption(
-                    f"品牌累積：{brand_city_sel} = {_bc} 次"
-                    + (f"（再執行 {BRAND_GROWTH_MIN_COUNT - _bc} 次可解鎖觸發條件）" if _bc < BRAND_GROWTH_MIN_COUNT else "")
+                    f"⏳ {brand_city_sel}品牌尚未建立基礎——再投入 {_remaining_inv} 次品牌經營，"
+                    f"並將消費者滿意度提升至 {BRAND_GROWTH_THRESHOLD}，即可解鎖每季自動 +{BRAND_GROWTH_RATE*100:.0f}% 市占"
+                    if _bc < BRAND_GROWTH_MIN_COUNT else
+                    f"⏳ {brand_city_sel}品牌基礎已建立——消費者滿意度提升至 {BRAND_GROWTH_THRESHOLD} 即可觸發自動成長"
                 )
             st.caption(
-                f"👤 持續曝光建立消費者信任，口碑效應逐漸積累 +{BRAND_MGMT_CONSUMER_SAT}　"
-                f"🛵 品牌形象提升，外送員認同感與接單意願上升 +{BRAND_MGMT_RIDER_SAT}　"
+                f"👤 持續曝光建立消費者信任，口碑效應逐漸積累，消費者滿意度 +{BRAND_MGMT_CONSUMER_SAT}　"
+                f"🛵 品牌形象提升，外送員認同感與接單意願上升，外送員滿意度 +{BRAND_MGMT_RIDER_SAT}　"
                 f"📊 市占 +{BRAND_MGMT_SHARE_GAIN*100:.0f}%"
             )
             st.caption(f"費用固定 {BRAND_MGMT_COST} 萬　｜　無連續衰減　｜　本季免除自然衰退")
 
     if _form_disabled:
-        st.error("⛔ 決策額度已滿（2/2），表單內選項已鎖定。請取消上方補貼、行銷或品牌經營才能啟用。")
+        st.error("⛔ 決策額度已滿（2/2），表單內選項已鎖定。請取消上方已選的決策才能啟用。")
     else:
         st.caption(f"已選 {_outside_chosen} / 2 項　｜　表單內剩餘可選 **{_remaining}** 個額度")
 
@@ -1697,62 +1771,78 @@ def show_decision_phase(state: dict):
         delta = -COMMISSION_STEP if direction == "降低 5%" else COMMISSION_STEP
         new_pct = max(int(COMMISSION_MIN*100), min(int(COMMISSION_MAX*100), commission_pct + int(delta*100)))
         sat_effect = (
-            f"外送員每單抽成降低，實拿提高，積極性上升　雙軌滿意度各 +{int(abs(delta*100))} / 城市"
+            f"平台抽成比例下降，外送員每單實際到手金額增加，接單意願與出勤積極性提升，消費者也受益於讓利優惠　雙軌滿意度各 +{int(abs(delta*100))} / 城市"
             if delta < 0 else
-            f"外送員抽成調高，實拿減少，怨言與離職率上升　雙軌滿意度各 -{int(delta*100*1.5):.0f} / 城市"
+            f"平台抽成比例調高，外送員每單扣掉後所剩更少，怨言累積、離職率上升，消費者間接感受到服務品質下滑　雙軌滿意度各 -{int(delta*100*1.5):.0f} / 城市"
         )
         return f"抽成 {commission_pct}% → {new_pct}%，{sat_effect}"
 
-    # ── 抽成和擴張放入 form（這兩個不需要即時預覽滑桿）
-    with st.form("decisions_form"):
-        col_c, col_d = st.columns(2)
-
-        with col_c:
-            with st.expander(f"📊 抽成調整（全域，現 {commission_pct}%）", expanded=True):
-                at_min = commission_pct <= int(COMMISSION_MIN * 100)
-                at_max = commission_pct >= int(COMMISSION_MAX * 100)
-                if at_min:
-                    st.info(f"已達下限 {int(COMMISSION_MIN*100)}%，無法再降")
-                    use_comm = False
-                    comm_dir = "降低 5%"
-                elif at_max:
-                    st.info(f"已達上限 {int(COMMISSION_MAX*100)}%，無法再升")
-                    use_comm = False
-                    comm_dir = "提高 5%"
+    # ── 抽成調整 | 區域擴張（form 外並排，抽成 checkbox 即時影響決策額度計數）
+    _exp_enabled = state["config"].get("expansion_enabled", True)
+    col_comm, col_exp = st.columns(2) if _exp_enabled else (st.columns(1)[0], None)
+    with col_comm:
+        with st.expander(f"📊 抽成調整（全域，現 {commission_pct}%）", expanded=True):
+            if _comm_at_min:
+                st.info(f"已達下限 {int(COMMISSION_MIN*100)}%，無法再降")
+                use_comm = False
+                comm_dir = "降低 5%"
+            elif _comm_at_max:
+                st.info(f"已達上限 {int(COMMISSION_MAX*100)}%，無法再升")
+                use_comm = False
+                comm_dir = "提高 5%"
+            else:
+                if _form_disabled and not _comm_checked:
+                    st.warning("🔒 決策額度已滿（2/2）——請先取消已選的其他決策")
+                elif not _comm_checked and _outside_chosen == 1:
+                    st.caption("⚠️ 已選 1 格，勾選後額度將用完（表單內選項會鎖定）")
                 else:
-                    use_comm = st.checkbox("執行抽成調整", key="use_comm", disabled=_form_disabled)
-                    _hint_dec = get_concept_hint_text("commission", None, state, context_override="decrease")
-                    _hint_inc = get_concept_hint_text("commission", None, state, context_override="increase")
-                    comm_dir = st.radio(
-                        "方向",
-                        ["降低 5%", "提高 5%"],
-                        key="comm_dir",
-                        help=f"{_hint_dec}\n\n{_hint_inc}",
-                    )
-                    st.caption(commission_preview(comm_dir))
+                    st.caption(f"剩餘決策額度：**{_remaining} / 2**")
+                _hint_dec = get_concept_hint_text("commission", None, state, context_override="decrease")
+                _hint_inc = get_concept_hint_text("commission", None, state, context_override="increase")
+                use_comm = st.checkbox("執行抽成調整", key="use_comm", disabled=(_form_disabled and not _comm_checked))
+                comm_dir = st.radio(
+                    "方向",
+                    ["降低 5%", "提高 5%"],
+                    key="comm_dir",
+                    captions=[_hint_dec or "", _hint_inc or ""],
+                )
+                st.caption(commission_preview(comm_dir))
 
-        with col_d:
+    if col_exp is None:
+        use_exp = False
+        exp_city = None
+    else:
+        with col_exp:
             _cant_afford_exp = state["money"] < EXPANSION_COST
             with st.expander(f"🚀 區域擴張（每城限一次，費用 {EXPANSION_COST} 萬）", expanded=True):
                 if not_expanded:
                     if _cant_afford_exp:
                         st.error(f"💸 資金不足（需 {EXPANSION_COST} 萬，現有 {state['money']:.1f} 萬）")
+                    if _form_disabled and not _exp_checked:
+                        st.warning("🔒 決策額度已滿（2/2）——請先取消已選的其他決策")
+                    elif not _exp_checked and _outside_chosen == 1:
+                        st.caption("⚠️ 已選 1 格，勾選後額度將用完")
+                    else:
+                        st.caption(f"剩餘決策額度：**{_remaining} / 2**")
                     _exp_hint = get_concept_hint_text("expansion", None, state)
                     use_exp = st.checkbox("執行區域擴張", key="use_exp",
-                                         disabled=_form_disabled or _cant_afford_exp,
+                                         disabled=(_form_disabled and not _exp_checked) or _cant_afford_exp,
                                          help=_exp_hint)
                     exp_city = st.selectbox("目標城市", not_expanded, key="exp_city")
-                    gain_pct = EXPANSION_IMMEDIATE * 100
-                    ongoing_pct = EXPANSION_ONGOING * 100
+                    _exp_selected_market = state["cities"][exp_city]["market"] if exp_city else 0
+                    _exp_new_market = round(_exp_selected_market * (1 + EXPANSION_MARKET_GROWTH))
                     st.caption(
-                        f"即時 +{gain_pct:.0f}%，之後每回合 +{ongoing_pct:.0f}%　｜　📌 擴張後永久免除市占自然流失\n"
-                        f"👤 進駐初期服務尚未成熟，履約品質不穩定 -2　🛵 新區訂單分散，跑單效率低 -2"
+                        f"市占即時 +{EXPANSION_IMMEDIATE*100:.0f}%　｜　"
+                        f"市場規模永久 {_exp_selected_market} → **{_exp_new_market}**（雙方營收同步成長）　｜　"
+                        f"📌 永久免除市占自然流失"
                     )
                 else:
                     st.success("✅ 三城市均已完成區域擴張")
                     use_exp = False
                     exp_city = None
 
+    # ── 收購 + 科技樹放入 form
+    with st.form("decisions_form", border=False):
         # ── 收購機制（競爭對手資金門檻解鎖）
         _comp_money_now = state.get("competitor_money", COMPETITOR_INITIAL_MONEY)
         _can_acquire = (
@@ -1946,9 +2036,9 @@ def show_report_phase(state: dict, advisor: AIAdvisor):
     _active_buffs = []
     _upgs = state.get("upgrades", {})
     if _upgs.get("aiRouting") and "aiRouting" not in _newly_unlocked:
-        _active_buffs.append("✨【AI 智慧路徑】補貼/行銷轉化 +25%，外送員滿意衰退減半")
+        _active_buffs.append(f"✨【AI 智慧路徑】市占 < {AI_ROUTING_SHARE_THRESHOLD*100:.0f}% 的城市補貼/行銷轉化 +25%，外送員滿意衰退減半")
     if _upgs.get("dynamicPricing") and "dynamicPricing" not in _newly_unlocked:
-        _active_buffs.append("✨【動態定價】本季營收已套用 +15% 增幅")
+        _active_buffs.append(f"✨【動態定價】消費者滿意度 ≥ {DYNAMIC_PRICING_SAT_THRESHOLD} 的城市本季營收 +15%")
     if _upgs.get("exclusiveMerchant") and "exclusiveMerchant" not in _newly_unlocked:
         _active_buffs.append("✨【獨家聯盟】外送荒市占流失率降至 1%")
     if _active_buffs:
@@ -2066,8 +2156,16 @@ def show_report_phase(state: dict, advisor: AIAdvisor):
 
 # ── UI：GAME_OVER 畫面 ────────────────────────────────────────────────────────
 
+def _score_bar(label: str, value: float, weight_text: str):
+    st.markdown(f"**<span style='color:#111;font-size:1.05rem'>{label}　{value:.0f} / 100（{weight_text}）</span>**", unsafe_allow_html=True)
+    st.progress(value / 100)
+
 def show_gameover_screen(state: dict, advisor: AIAdvisor):
     result = state.get("game_result", check_game_result(state))
+
+    # 第一次進入結算畫面時捲回頂部
+    if not st.session_state.get("_game_end_logged"):
+        st.components.v1.html("<script>window.parent.scrollTo({top: 0, behavior: 'smooth'});</script>", height=0)
 
     # 只在第一次進入 GAME_OVER 時記錄 game_end（避免 rerun 重複寫入）
     if not st.session_state.get("_game_end_logged"):
@@ -2083,71 +2181,187 @@ def show_gameover_screen(state: dict, advisor: AIAdvisor):
         })
         st.session_state["_game_end_logged"] = True
 
-    _cfg = state["config"]
-    if result == "win":
-        st.title("🎉 Series A 融資成功！")
-        st.success(f"恭喜！你達成了 {_cfg['win_total']} 項中的 {_cfg['win_required']} 項以上勝利條件，飛食平台獲得下一輪融資！")
-    else:
-        st.title("😔 Series A 融資未通過")
-        if state["money"] <= 0:
-            st.error("資金耗盡，平台宣告破產。")
-        else:
-            st.error(f"{state.get('max_rounds', 10)} 回合結束，未能達成足夠的勝利條件。")
+    # ── 計算評分（只算一次，存入 session_state）
+    if "_scoring" not in st.session_state:
+        primary, p_icon, p_desc, secondary, s_icon, s_desc = sc.determine_badges(state)
+        grade_data = sc.calculate_grade(state)
+        st.session_state["_scoring"] = {
+            "primary": primary, "primary_icon": p_icon, "primary_desc": p_desc,
+            "secondary": secondary, "secondary_icon": s_icon, "secondary_desc": s_desc,
+            **grade_data,
+        }
+    _sc = st.session_state["_scoring"]
 
-    st.subheader("最終勝利條件")
+    _cfg = state["config"]
+    _grade_emoji = {"S": "🌟", "A": "🟢", "B": "🔵", "C": "🟠", "D": "🔴"}
+
+    # ── 第一階段：大版評分 + 徽章，等玩家點按鈕再進結算報告
+    if not st.session_state.get("_scoring_revealed"):
+        # 結果標題（大）
+        if result == "win":
+            st.markdown("<h1 style='text-align:center;font-size:2.8rem'>🎉 Series A 融資成功！</h1>", unsafe_allow_html=True)
+        else:
+            st.markdown("<h1 style='text-align:center;font-size:2.8rem'>😔 Series A 融資未通過</h1>", unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # 等級超大顯示
+        _g = _sc["grade"]
+        st.markdown(
+            f"<div style='text-align:center;font-size:5rem;line-height:1.1'>{_grade_emoji[_g]}</div>"
+            f"<div style='text-align:center;font-size:3rem;font-weight:700;color:#111'>{_g} 級　{_sc['total']:.0f} 分</div>",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # 四維評分
+        col_l, col_mid, col_r = st.columns([1, 3, 1])
+        with col_mid:
+            _score_bar("經營效率", _sc["efficiency"], "權重 30%")
+            _score_bar("市場掌控", _sc["market"],     "權重 25%")
+            _score_bar("品牌聲譽", _sc["reputation"], "權重 25%")
+            _score_bar("策略深度", _sc["depth"],      "權重 20%")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # 徽章（置中）
+        st.markdown(
+            f"<div style='text-align:center;font-size:3rem'>{_sc['primary_icon']}</div>"
+            f"<div style='text-align:center;font-size:1.6rem;font-weight:700;color:#111'>{_sc['primary']}</div>"
+            f"<div style='text-align:center;color:#555;font-size:0.95rem'>{_sc['primary_desc']}</div>",
+            unsafe_allow_html=True,
+        )
+        if _sc["secondary"]:
+            st.markdown(
+                f"<div style='text-align:center;margin-top:0.8rem;font-size:1.1rem'>"
+                f"{_sc['secondary_icon']} <b>{_sc['secondary']}</b>　{_sc['secondary_desc']}</div>",
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("<br><br>", unsafe_allow_html=True)
+        if st.button("📋 查看完整結算報告", type="primary", use_container_width=True):
+            st.session_state["_scoring_revealed"] = True
+            st.rerun()
+        return
+
+    # ── 第二階段：CEO 報告版面 ────────────────────────────────────────────────
+
+    # 全域報告樣式
+    st.markdown("""
+<style>
+.report-header {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 60%, #0f3460 100%);
+    color: #fff;
+    padding: 2rem 2.5rem 1.5rem;
+    border-radius: 8px;
+    margin-bottom: 1.5rem;
+}
+.report-header .company { font-size: 0.85rem; letter-spacing: 0.18em; color: #a0aec0; text-transform: uppercase; }
+.report-header .doc-title { font-size: 1.9rem; font-weight: 700; margin: 0.3rem 0 0.2rem; }
+.report-header .doc-meta { font-size: 0.88rem; color: #90cdf4; }
+.report-header .verdict-win  { display:inline-block; margin-top:0.8rem; background:#276749; color:#c6f6d5; padding:0.25rem 0.9rem; border-radius:4px; font-size:0.9rem; font-weight:600; }
+.report-header .verdict-lose { display:inline-block; margin-top:0.8rem; background:#742a2a; color:#fed7d7; padding:0.25rem 0.9rem; border-radius:4px; font-size:0.9rem; font-weight:600; }
+.section-heading {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    border-left: 4px solid #3182ce;
+    padding-left: 0.75rem;
+    margin: 2rem 0 0.8rem;
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #1a202c;
+}
+.section-num { color: #3182ce; font-size: 0.8rem; font-weight: 600; letter-spacing: 0.05em; }
+</style>
+""", unsafe_allow_html=True)
+
+    # 報告文件標頭
+    _rounds_played = state["round"] - 1
+    _verdict_class = "verdict-win" if result == "win" else "verdict-lose"
+    _verdict_text  = "✓ Series A 融資核准" if result == "win" else "✗ Series A 融資未通過"
+    st.markdown(f"""
+<div class="report-header">
+  <div class="company">飛食科技股份有限公司　FlyEats Technology Co., Ltd.</div>
+  <div class="doc-title">董事會年度營運總結報告</div>
+  <div class="doc-meta">
+    報告期間：第 1 季 ～ 第 {_rounds_played} 季　｜
+    難度：{_cfg.get('name', '標準')}　｜
+    策略徽章：{_sc['primary_icon']} {_sc['primary']}　｜
+    綜合評等：{_sc['grade']} 級 {_sc['total']:.0f} 分
+  </div>
+  <div class="{_verdict_class}">{_verdict_text}</div>
+</div>
+""", unsafe_allow_html=True)
+
+    # § 1  勝利條件評核
+    st.markdown('<div class="section-heading"><span class="section-num">§ 1</span> 勝利條件評核</div>', unsafe_allow_html=True)
     show_win_conditions(state)
 
-    st.divider()
-    st.subheader("最終市場狀況")
+    # § 2  各城市市場現況
+    st.markdown('<div class="section-heading"><span class="section-num">§ 2</span> 各城市市場現況</div>', unsafe_allow_html=True)
     show_city_cards(state)
 
-    st.divider()
-    st.subheader("🤖 AI 顧問最終總結")
+    # § 3  顧問總結意見
+    st.markdown('<div class="section-heading"><span class="section-num">§ 3</span> 資深顧問總結意見</div>', unsafe_allow_html=True)
     if not state.get("ending_report"):
-        with st.spinner("AI 顧問撰寫最終總結中…"):
-            state["ending_report"] = advisor.generate_ending_report(state)
+        with st.spinner("AI 顧問撰寫中…"):
+            state["ending_report"] = advisor.generate_ending_report(state, scoring=_sc)
         st.session_state["state"] = state
     st.markdown(state["ending_report"])
 
-    st.divider()
-    st.subheader("📚 本局概念學習統計")
-    _experienced = get_experienced_concepts(state)
-    st.markdown(f"你體驗了 **{len(_experienced)}/{TOTAL_TEACHABLE_CONCEPTS}** 個經濟學概念！")
-    _mech_concepts = [v for v in _experienced.values() if v["source"] == "mechanism"]
-    _situ_concepts = [v for v in _experienced.values() if v["source"] == "situation"]
-    if _mech_concepts:
-        st.markdown("✅ 透過決策體驗：" + "、".join(c["name"] for c in _mech_concepts))
-    if _situ_concepts:
-        st.markdown("✅ 透過情境觀察：" + "、".join(c["name"] for c in _situ_concepts))
-    if len(_experienced) < TOTAL_TEACHABLE_CONCEPTS:
-        st.caption("💡 提示：試試看持續衝高某城市市占、逼對手燒錢到破產，或連續觀察同一城市的消費者反應，可能會觸發新的概念！")
+    # § 4  概念地圖
+    st.markdown('<div class="section-heading"><span class="section-num">§ 4</span> 經濟學概念地圖</div>', unsafe_allow_html=True)
+    _concept_map = sc.build_concept_map(state)
+    _triggered_n = sum(1 for v in _concept_map.values() if v["status"] == "triggered")
+    _near_n      = sum(1 for v in _concept_map.values() if v["status"] == "near_miss")
+    st.caption(f"✅ 已觸發 {_triggered_n} 個　🔶 差一點 {_near_n} 個　⬜ 未探索 {len(_concept_map) - _triggered_n - _near_n} 個")
+    _map_items = list(_concept_map.items())
+    _cols_per_row = 4
+    for row_start in range(0, len(_map_items), _cols_per_row):
+        row = _map_items[row_start : row_start + _cols_per_row]
+        cols = st.columns(len(row))
+        for col, (cid, info) in zip(cols, row):
+            with col:
+                status = info["status"]
+                label  = f"{info['icon']} {info['name']}"
+                if status == "triggered":
+                    st.success(label)
+                elif status == "near_miss":
+                    st.warning(label)
+                    if info["hint"]:
+                        st.caption(info["hint"])
+                else:
+                    st.info(label)
 
-    st.divider()
+    # § 5  決策概念對照分析
+    st.markdown('<div class="section-heading"><span class="section-num">§ 5</span> 決策概念對照分析</div>', unsafe_allow_html=True)
     if not state.get("concept_summary"):
-        with st.spinner("整理本局決策概念對照表中…"):
+        with st.spinner("整理中…"):
             _summary_rows = build_concept_summary_data(state)
             state["concept_summary"] = advisor.generate_concept_summary(state, _summary_rows)
         st.session_state["state"] = state
     st.markdown(state["concept_summary"])
 
-    # 回合歷程
+    # § 6  營運數據歷程
     if state["history"]:
         import pandas as pd
         rounds = [h["round"] for h in state["history"]]
+        st.markdown('<div class="section-heading"><span class="section-num">§ 6</span> 營運數據歷程</div>', unsafe_allow_html=True)
 
-        st.divider()
-        st.subheader("📈 各回合資金歷程")
+        st.caption("資金走勢（萬）")
         df_money = pd.DataFrame({"回合": rounds, "資金（萬）": [h["money_after"] for h in state["history"]]})
         st.line_chart(df_money.set_index("回合"))
 
-        st.subheader("📊 各回合市占歷程")
+        st.caption("三城市占（%）")
         df_share = pd.DataFrame({
             "回合": rounds,
             **{city: [h["shares_after"][city] * 100 for h in state["history"]] for city in CITIES},
         })
         st.line_chart(df_share.set_index("回合"))
 
-        st.subheader("😊 各回合滿意度歷程")
+        st.caption("消費者／外送商家滿意度")
         df_sat = pd.DataFrame({
             "回合": rounds,
             "消費者滿意度": [h["consumer_sat_after"] for h in state["history"]],

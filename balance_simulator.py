@@ -138,13 +138,52 @@ def strategy_balanced(state):
     return [{"type": "subsidy", "city": "台北", "amount": amt}]
 
 
+def strategy_share_plus_sat(state):
+    """兩階段通關：台北養滿意度 → 高雄後期衝市占。
+
+    Phase 1 (r1-6): 台北 10萬/round（保守燒錢，累積台北 consumer_sat，
+                    台北最終達 ~84，加權均值 ~63 ≥ 60 ✓）
+    Phase 2 (r7+): 高雄 30萬，但每補貼 2 回合就穿插一回合台北（重置連續計數），
+                   讓第 3 次高雄補貼以 100% 效率執行：
+                   r7(高雄+68%)→51% / r8(+51%)→72% / r9(台北重置) / r10(高雄+68%)→72% ✓
+    全程: min_rider < 58 → 降抽成（+7.5 全城，共需 2 次），加權外送滿意 ~71 ✓。
+    """
+    decisions = []
+    r         = state["round"]
+    min_rider = min(state["cities"][c]["rider_satisfaction"] for c in CITIES)
+
+    # 決策 1：降抽成護外送員滿意度（全程最多觸發 2 次，抽成 0.30→0.20）
+    if min_rider < 58 and state["commission_rate"] > game.COMMISSION_MIN:
+        decisions.append({"type": "commission", "delta": -game.COMMISSION_STEP})
+
+    # 決策 2：主補貼
+    if len(decisions) < 2:
+        if r >= 7:
+            # Phase 2：高雄衝刺，但連續 ≥2 次且還沒到最後一回合時穿插台北重置
+            gs_consec = state["cities"]["高雄"].get("consecutive_subsidy_count", 0)
+            if gs_consec >= 2 and r < 10:
+                target, budget = "台北", 10   # 重置高雄 consecutive → 下回合高雄恢復 100% 效率
+            else:
+                target, budget = "高雄", 30   # 正常衝刺
+        else:
+            target, budget = "台北", 10       # Phase 1：台北護 consumer_sat
+
+        amt    = _money_cap(state, budget)
+        safety = 8 + 10  # 固定成本 + 緩衝
+        if amt >= 5 and state["money"] >= amt + safety:
+            decisions.append({"type": "subsidy", "city": target, "amount": amt})
+
+    return decisions[:2]
+
+
 STRATEGIES = {
-    "純隨機":     strategy_random,
-    "單城集中":   strategy_single_city("台北"),
-    "分散投資":   strategy_distributed,
-    "先研發後收割": strategy_tech_then_harvest,
-    "圍剿對手":   strategy_siege("台北"),
-    "兼顧滿意度":  strategy_balanced,
+    "純隨機":       strategy_random,
+    "單城集中":     strategy_single_city("台北"),
+    "分散投資":     strategy_distributed,
+    "先研發後收割":  strategy_tech_then_harvest,
+    "圍剿對手":     strategy_siege("台北"),
+    "兼顧滿意度":   strategy_balanced,
+    "市占+滿意度":  strategy_share_plus_sat,
 }
 
 
@@ -194,28 +233,41 @@ def run_one_game(decision_fn, initial_money=120.0, max_rounds=10):
 
 def run_trials(decision_fn, n_trials, **kwargs):
     results = [run_one_game(decision_fn, **kwargs) for _ in range(n_trials)]
-    wins = sum(1 for r in results if r["result"] == "win")
+    wins   = [r for r in results if r["result"] == "win"]
+    losses = [r for r in results if r["result"] != "win"]
     early_bankrupt = sum(1 for r in results if r["bankrupt_round"] is not None and r["bankrupt_round"] <= 3)
     avg_rounds = statistics.mean(r["rounds_played"] for r in results)
-    avg_money = statistics.mean(r["final_money"] for r in results)
-    avg_share = statistics.mean(r["max_share"] for r in results)
+    avg_money  = statistics.mean(r["final_money"] for r in results)
+    avg_share  = statistics.mean(r["max_share"] for r in results)
+    avg_csat   = statistics.mean(r["consumer_sat"] for r in results)
+    avg_rsat   = statistics.mean(r["rider_sat"] for r in results)
+    # 敗因分類（僅 loss 樣本）
+    miss_share = sum(1 for r in losses if r["max_share"] < 0.70) if losses else 0
+    miss_csat  = sum(1 for r in losses if r["consumer_sat"] < 60) if losses else 0
+    miss_rsat  = sum(1 for r in losses if r["rider_sat"] < 60) if losses else 0
     return {
         "n": n_trials,
-        "win_rate": wins / n_trials,
+        "win_rate": len(wins) / n_trials,
         "early_bankrupt_rate": early_bankrupt / n_trials,
         "avg_rounds": avg_rounds,
         "avg_final_money": avg_money,
         "avg_max_share": avg_share,
+        "avg_csat": avg_csat,
+        "avg_rsat": avg_rsat,
+        "miss_share_pct": miss_share / len(losses) if losses else 0,
+        "miss_csat_pct":  miss_csat  / len(losses) if losses else 0,
+        "miss_rsat_pct":  miss_rsat  / len(losses) if losses else 0,
     }
 
 
 def print_report(title, strategy_results):
     print(f"\n{'='*70}\n{title}\n{'='*70}")
-    print(f"{'策略':12s}  {'通關率':>8s}  {'3回合內破產':>10s}  {'平均回合':>8s}  {'平均資金':>10s}  {'平均最高市占':>10s}")
+    print(f"{'策略':12s}  {'通關率':>7s}  {'平均市占':>8s}  {'消費者':>6s}  {'外送員':>6s}  敗因(市占/消費者/外送員)")
     for name, r in strategy_results.items():
         print(
-            f"{name:12s}  {r['win_rate']*100:7.1f}%  {r['early_bankrupt_rate']*100:9.1f}%  "
-            f"{r['avg_rounds']:8.1f}  {r['avg_final_money']:9.1f}萬  {r['avg_max_share']*100:9.1f}%"
+            f"{name:12s}  {r['win_rate']*100:6.1f}%  {r['avg_max_share']*100:7.1f}%"
+            f"  {r['avg_csat']:5.1f}  {r['avg_rsat']:5.1f}"
+            f"  {r['miss_share_pct']*100:4.0f}% / {r['miss_csat_pct']*100:4.0f}% / {r['miss_rsat_pct']*100:4.0f}%"
         )
 
 
