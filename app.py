@@ -39,8 +39,8 @@ COMMISSION_MAX           = 0.40
 COMMISSION_STEP          = 0.05
 WIN_MONEY                = 320.0  # 萬（challenge 門檻；standard 獨立設定 250；提高至 320 以降低純隨機透過財富勝利的機率）
 WIN_SHARE                = 0.70   # 任一城市市占 ≥ 70%（challenge 門檻；standard 為 0.60 獨立設定於 DIFFICULTY_PRESETS）
-WIN_CONSUMER_SAT         = 65     # 消費者滿意度 ≥ 65
-WIN_RIDER_SAT            = 65     # 外送商家滿意度 ≥ 65
+WIN_CONSUMER_SAT         = 60     # 消費者滿意度 ≥ 60
+WIN_RIDER_SAT            = 60     # 外送商家滿意度 ≥ 60
 RIDER_SHORTAGE_THRESHOLD         = 40  # 外送荒觸發門檻
 CONSUMER_REVIEW_THRESHOLD        = 30  # 負評爆炸門檻
 CONSUMER_REVIEW_SHARE_LOSS       = 0.04  # 負評爆炸：市占額外流失（v1.18 由 2% 提高至 4%，加重低滿意度代價）
@@ -74,7 +74,7 @@ SWAN_EVENTS = [
         "id": "fuel_hike",
         "name": "⛽ 燃油價格飆漲",
         "tone": "bad",
-        "description": "國際油價暴衝，全行業外送員怨聲載道。飛食與送香公外送員滿意度同步暴跌（-10），飛食本季額外維運成本 +8 萬。",
+        "description": "國際油價暴衝，全行業外送員怨聲載道。飛食與送香公外送員滿意度同步 -10，飛食本季額外維運成本 +8 萬。",
         "modifiers": {"rider_sat_delta": -10, "fixed_cost_delta": 8, "competitor_sat_delta": -10},
     },
     {
@@ -116,7 +116,7 @@ SWAN_EVENTS = [
         "id": "rider_exodus",
         "name": "🏃 外送員大規模出走",
         "tone": "bad",
-        "description": "外送行業工作條件惡化，大批外送員轉投物流或餐飲業。飛食與送香公外送員滿意度同步暴跌（-12），配送延誤也拖累雙方消費者體驗（-6）。",
+        "description": "外送行業工作條件惡化，大批外送員轉投物流或餐飲業。飛食與送香公外送員滿意度同步 -12，配送延誤也拖累雙方消費者滿意度 -6。",
         "modifiers": {"rider_sat_delta": -12, "consumer_sat_delta": -6, "competitor_sat_delta": -12},
     },
     {
@@ -1590,7 +1590,7 @@ def show_market_news_phase(state: dict, advisor: AIAdvisor):
             f"<div style='background:{_bg};border-left:5px solid {_tc};"
             f"padding:0.8rem 1.2rem;border-radius:6px;margin-bottom:1rem'>"
             f"<b style='color:{_tc};font-size:1.2rem'>⚡ 本季黑天鵝事件：{event['name']}</b><br>"
-            f"<span style='font-size:1rem'>{event['description']}</span></div>",
+            f"<span style='color:#1a1a1a;font-size:1rem'>{event['description']}</span></div>",
             unsafe_allow_html=True,
         )
 
@@ -1678,7 +1678,7 @@ def _dsl_card_available(card_type: str, state: dict, exclude_type) -> bool:
 
 
 def _dsl_show_cards(state: dict, slot_num: int, exclude_type):
-    st.caption(f"**第 {slot_num} 項決策**：點選類型")
+    st.caption(f"**決策 {slot_num}**：點選類型")
     cards = [(ct, ic, nm, dc) for ct, ic, nm, dc in _DSL_CARD_DEFS
              if _dsl_card_available(ct, state, exclude_type)]
     rows = [cards[i:i + 3] for i in range(0, len(cards), 3)]
@@ -1708,7 +1708,7 @@ def _dsl_show_detail(state: dict, slot_num: int):
     _ai_routing = state.get("upgrades", {}).get("aiRouting", False)
     _icon_map = {ct: ic for ct, ic, _, _ in _DSL_CARD_DEFS}
     _name_map = {ct: nm for ct, ic, nm, _ in _DSL_CARD_DEFS}
-    st.markdown(f"**{_icon_map.get(slot_type, '')} {_name_map.get(slot_type, slot_type)}**　第 {slot_num} 項")
+    st.markdown(f"**{_icon_map.get(slot_type, '')} {_name_map.get(slot_type, slot_type)}**　決策 {slot_num}")
 
     decision_data = None
     valid = True
@@ -1845,7 +1845,7 @@ def _dsl_show_detail(state: dict, slot_num: int):
     col_ok, col_back = st.columns([2, 1])
     with col_ok:
         if valid and st.button(
-                f"✅ 確認第 {slot_num} 項",
+                f"✅ 確認決策 {slot_num}",
                 key=f"dsl_confirm_{slot_num}",
                 type="primary",
                 use_container_width=True):
@@ -1899,7 +1899,7 @@ def show_decision_phase(state: dict):
     _money_color = "#4CAF50" if _money >= 60 else ("#FF9800" if _money >= 30 else "#F44336")
     st.markdown(
         f"<div style='background:{_money_color}22;border-left:4px solid {_money_color};"
-        f"padding:0.6rem 1rem;border-radius:4px;margin-bottom:0.5rem'>"
+        f"padding:0.6rem 1rem;border-radius:4px;margin-bottom:0.5rem;color:inherit'>"
         f"💰 <b>目前資金：{_money:.1f} 萬</b>　｜　"
         f"扣除本回合固定維運成本 {FIXED_OPERATIONAL_COST:.0f} 萬後剩餘 "
         f"<b>{_after_fixed:.1f} 萬</b></div>",
@@ -1922,10 +1922,17 @@ def show_decision_phase(state: dict):
     if not s1_locked:
         if s1_type is None:
             _dsl_show_cards(state, slot_num=1, exclude_type=None)
+            st.divider()
+            if st.button("⏭️ 跳過本回合，不做任何決策", key="dsl_skip_all"):
+                log_event(state, "decision_made", {"decisions": [], "money_before": state["money"]})
+                new_state = finalize_round(state, [])
+                new_state["phase"] = "REPORT"
+                st.session_state["state"] = new_state
+                st.rerun()
         else:
             _dsl_show_detail(state, slot_num=1)
     else:
-        st.success(f"✅ 第 1 項：{_dsl_locked_label(s1_data, state)}")
+        st.success(f"✅ 決策 1：{_dsl_locked_label(s1_data, state)}")
         col_e1, _ = st.columns([1, 4])
         with col_e1:
             if st.button("🗑️ 刪除", key="dsl_edit_1"):
@@ -1947,16 +1954,14 @@ def show_decision_phase(state: dict):
         else:
             s2_data = st.session_state.get("dsl_slot2_data")
             if s2_data is not None:
-                st.success(f"✅ 第 2 項：{_dsl_locked_label(s2_data, state)}")
-            else:
-                st.info("第 2 項：跳過")
-            col_e2, _ = st.columns([1, 4])
-            with col_e2:
-                if st.button("🗑️ 刪除", key="dsl_edit_2"):
-                    st.session_state["dsl_slot2_type"] = None
-                    st.session_state["dsl_slot2_locked"] = False
-                    st.session_state["dsl_slot2_data"] = None
-                    st.rerun()
+                st.success(f"✅ 決策 2：{_dsl_locked_label(s2_data, state)}")
+                col_e2, _ = st.columns([1, 4])
+                with col_e2:
+                    if st.button("🗑️ 刪除", key="dsl_edit_2"):
+                        st.session_state["dsl_slot2_type"] = None
+                        st.session_state["dsl_slot2_locked"] = False
+                        st.session_state["dsl_slot2_data"] = None
+                        st.rerun()
 
             st.divider()
 
@@ -2161,7 +2166,7 @@ def show_report_phase(state: dict, advisor: AIAdvisor):
         _sb = _swan_bg.get(_swan["tone"], "#E3F2FD")
         st.markdown(
             f"<div style='background:{_sb};border-left:4px solid {_sc};"
-            f"padding:0.5rem 1rem;border-radius:4px'>"
+            f"padding:0.5rem 1rem;border-radius:4px;color:#1a1a1a'>"
             f"⚡ <b>本季黑天鵝：{_swan['name']}</b>　{_swan['description']}</div>",
             unsafe_allow_html=True,
         )
@@ -2221,7 +2226,7 @@ def show_report_phase(state: dict, advisor: AIAdvisor):
         _ic = state["investor_comment"]
         st.markdown(
             f"<div style='background:#F3E5F5;border-left:4px solid #7B1FA2;"
-            f"padding:0.6rem 1.2rem;border-radius:6px'>"
+            f"padding:0.6rem 1.2rem;border-radius:6px;color:#1a1a1a'>"
             f"<span style='color:#6A1B9A;font-size:0.9rem'>💼 投資人評語</span><br>"
             f"<span style='font-size:1.1rem;font-style:italic'>「{_ic}」</span></div>",
             unsafe_allow_html=True,
@@ -2252,7 +2257,7 @@ def show_report_phase(state: dict, advisor: AIAdvisor):
 # ── UI：GAME_OVER 畫面 ────────────────────────────────────────────────────────
 
 def _score_bar(label: str, value: float, weight_text: str):
-    st.markdown(f"**<span style='color:#111;font-size:1.05rem'>{label}　{value:.0f} / 100（{weight_text}）</span>**", unsafe_allow_html=True)
+    st.markdown(f"**{label}　{value:.0f} / 100（{weight_text}）**")
     st.progress(value / 100)
 
 def show_gameover_screen(state: dict, advisor: AIAdvisor):
@@ -2304,7 +2309,7 @@ def show_gameover_screen(state: dict, advisor: AIAdvisor):
         _g = _sc["grade"]
         st.markdown(
             f"<div style='text-align:center;font-size:5rem;line-height:1.1'>{_grade_emoji[_g]}</div>"
-            f"<div style='text-align:center;font-size:3rem;font-weight:700;color:#111'>{_g} 級　{_sc['total']:.0f} 分</div>",
+            f"<div style='text-align:center;font-size:3rem;font-weight:700'>{_g} 級　{_sc['total']:.0f} 分</div>",
             unsafe_allow_html=True,
         )
 
@@ -2323,8 +2328,8 @@ def show_gameover_screen(state: dict, advisor: AIAdvisor):
         # 徽章（置中）
         st.markdown(
             f"<div style='text-align:center;font-size:3rem'>{_sc['primary_icon']}</div>"
-            f"<div style='text-align:center;font-size:1.6rem;font-weight:700;color:#111'>{_sc['primary']}</div>"
-            f"<div style='text-align:center;color:#555;font-size:0.95rem'>{_sc['primary_desc']}</div>",
+            f"<div style='text-align:center;font-size:1.6rem;font-weight:700'>{_sc['primary']}</div>"
+            f"<div style='text-align:center;font-size:0.95rem;opacity:0.7'>{_sc['primary_desc']}</div>",
             unsafe_allow_html=True,
         )
         if _sc["secondary"]:
@@ -2366,7 +2371,7 @@ def show_gameover_screen(state: dict, advisor: AIAdvisor):
     margin: 2rem 0 0.8rem;
     font-size: 1.15rem;
     font-weight: 700;
-    color: #1a202c;
+    color: inherit;
 }
 .section-num { color: #3182ce; font-size: 0.8rem; font-weight: 600; letter-spacing: 0.05em; }
 </style>
