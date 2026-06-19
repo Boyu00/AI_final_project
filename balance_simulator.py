@@ -176,6 +176,49 @@ def strategy_share_plus_sat(state):
     return decisions[:2]
 
 
+def strategy_brand_route_c(state):
+    """路線 C 品牌飛輪（挑戰模式）：台中品牌投資 → 飛輪 + 補貼衝市占。
+
+    Phase 1 (r1-2): 台中品牌經營（建立 brand_count=2 + consumer_sat≥75，觸發飛輪 +7.5%/回合）
+    Phase 2 (r3+):  台中 30萬補貼（飛輪 +7.5%/回合 + 補貼，連續≥2 時穿插台北重置）
+    全程: min_rider < 58 → 降抽成
+    """
+    decisions = []
+    r         = state["round"]
+    min_rider = min(state["cities"][c]["rider_satisfaction"] for c in CITIES)
+
+    # 決策 1：降抽成護外送員
+    if min_rider < 58 and state["commission_rate"] > game.COMMISSION_MIN:
+        decisions.append({"type": "commission", "delta": -game.COMMISSION_STEP})
+
+    if len(decisions) < 2:
+        brand_count_tc = state.get("brand_count", {}).get("台中", 0)
+        flywheel_ready = (
+            brand_count_tc >= game.BRAND_GROWTH_MIN_COUNT and
+            state["cities"]["台中"]["consumer_satisfaction"] >= game.BRAND_GROWTH_THRESHOLD
+        )
+
+        if r <= 2 and not flywheel_ready and state["config"].get("brand_management_enabled"):
+            # Phase 1：台中品牌投資
+            safety = 8 + 10
+            if state["money"] >= game.BRAND_MGMT_COST + safety:
+                decisions.append({"type": "brand_management", "city": "台中"})
+        else:
+            # Phase 2：台中補貼衝刺，連續 ≥2 且非最後回合則穿插台北重置
+            tc_consec = state["cities"]["台中"].get("consecutive_subsidy_count", 0)
+            if tc_consec >= 2 and r < 10:
+                target, budget = "台北", 10   # 重置台中 consecutive → 下回合恢復 100% 效率
+            else:
+                target, budget = "台中", 30   # 正常衝刺
+
+            amt    = _money_cap(state, budget)
+            safety = 8 + 10
+            if amt >= 5 and state["money"] >= amt + safety:
+                decisions.append({"type": "subsidy", "city": target, "amount": amt})
+
+    return decisions[:2]
+
+
 STRATEGIES = {
     "純隨機":       strategy_random,
     "單城集中":     strategy_single_city("台北"),
@@ -184,6 +227,7 @@ STRATEGIES = {
     "圍剿對手":     strategy_siege("台北"),
     "兼顧滿意度":   strategy_balanced,
     "市占+滿意度":  strategy_share_plus_sat,
+    "品牌飛輪(路線C)": strategy_brand_route_c,
 }
 
 
@@ -211,6 +255,7 @@ def run_one_game(decision_fn, initial_money=120.0, max_rounds=10):
                 total_spend += costs[d["upgradeType"]]
             elif d["type"] == "acquisition":
                 total_spend += game.ACQUISITION_COST
+        total_spend += game.BRAND_MGMT_COST * sum(1 for d in decisions if d["type"] == "brand_management")
         if total_spend > state["money"]:
             decisions = []  # 超支就視為本回合不行動（保守處理）
         state = game.finalize_round(state, decisions)
