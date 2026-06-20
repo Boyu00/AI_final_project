@@ -92,23 +92,39 @@ def strategy_distributed(state):
 
 
 def strategy_tech_then_harvest(state):
-    """先研發後收割：前 3 回合研發科技，之後重砸台北。"""
-    if state["round"] <= 3:
+    decisions = []
+    r = state["round"]
+    min_rider = min(state["cities"][c]["rider_satisfaction"] for c in game.CITIES)
+    
+    # 決策 1：降抽成護外送員滿意度（避免外送荒）
+    if min_rider < 58 and state["commission_rate"] > game.COMMISSION_MIN:
+        decisions.append({"type": "commission", "delta": -game.COMMISSION_STEP})
+
+    # 決策 2/3：購買科技
+    if len(decisions) < 2:
         upgs = state.get("upgrades", {})
         catalog = [
-            ("aiRouting", game.UPGRADE_AI_ROUTING_COST),
             ("dynamicPricing", game.UPGRADE_DYNAMIC_PRICING_COST),
+            ("aiRouting", game.UPGRADE_AI_ROUTING_COST),
             ("exclusiveMerchant", game.UPGRADE_EXCLUSIVE_MERCHANT_COST),
         ]
-        available = [(k, c) for k, c in catalog if not upgs.get(k) and state["money"] >= c]
-        if available:
-            k, _ = available[0]
-            return [{"type": "upgrade", "upgradeType": k}]
-        return []
-    amt = _money_cap(state, 30)
-    if amt < 5 or state["money"] < 5:
-        return []
-    return [{"type": "subsidy", "city": "台北", "amount": amt}]
+        # 依照順序買：動態定價 -> AI路徑 -> 獨家特約
+        for k, c in catalog:
+            if not upgs.get(k) and state["money"] >= c + 15: # 保留 15 萬安全水位
+                decisions.append({"type": "upgrade", "upgradeType": k})
+                break
+
+    # 決策 3/4：有剩餘行動點數時，進行投資
+    if len(decisions) < 2:
+        # Phase 2: 台中或台北投資
+        # 由於 AI路徑 加成補貼，我們在科技出關後重砸台北
+        target, budget = "台北", 25
+        amt = _money_cap(state, budget)
+        safety = 8 + 10
+        if amt >= 5 and state["money"] >= amt + safety:
+            decisions.append({"type": "subsidy", "city": target, "amount": amt})
+
+    return decisions[:2]
 
 
 def strategy_siege(city="台北"):
@@ -177,10 +193,10 @@ def strategy_share_plus_sat(state):
 
 
 def strategy_brand_route_c(state):
-    """路線 C 品牌飛輪（挑戰模式）：台中品牌投資 → 飛輪 + 補貼衝市占。
+    """路線 C 品牌正向循環（挑戰模式）：台中品牌投資 → 正向循環 + 補貼衝市占。
 
-    Phase 1 (r1-2): 台中品牌經營（建立 brand_count=2 + consumer_sat≥75，觸發飛輪 +7.5%/回合）
-    Phase 2 (r3+):  台中 30萬補貼（飛輪 +7.5%/回合 + 補貼，連續≥2 時穿插台北重置）
+    Phase 1 (r1-2): 台中品牌經營（建立 brand_count=2 + consumer_sat≥75，觸發正向循環 +7.5%/回合）
+    Phase 2 (r3+):  台中 30萬補貼（正向循環 +7.5%/回合 + 補貼，連續≥2 時穿插台北重置）
     全程: min_rider < 58 → 降抽成
     """
     decisions = []
@@ -227,7 +243,7 @@ STRATEGIES = {
     "圍剿對手":     strategy_siege("台北"),
     "兼顧滿意度":   strategy_balanced,
     "市占+滿意度":  strategy_share_plus_sat,
-    "品牌飛輪(路線C)": strategy_brand_route_c,
+    "品牌正向循環(路線C)": strategy_brand_route_c,
 }
 
 

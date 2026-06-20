@@ -501,9 +501,18 @@ class AIAdvisor:
 
         # 升級與策略補充資訊
         upgrades = game_state.get("upgrades", {})
-        upgrade_names = {"aiRouting": "AI 智慧路徑", "dynamicPricing": "動態定價", "exclusiveMerchant": "獨家聯盟"}
-        unlocked = [upgrade_names[k] for k in upgrades if upgrades[k] and k in upgrade_names]
-        upgrade_line = f"科技解鎖：{'、'.join(unlocked) if unlocked else '無'}"
+        upgrade_names = {"aiRouting": "智慧派單", "dynamicPricing": "動態定價", "exclusiveMerchant": "獨家聯盟"}
+        
+        # 判定科技是否已「出關」生效（delay = 2）
+        def _is_upg_active(state, key, delay=2):
+            val = state.get("upgrades", {}).get(key, 0)
+            if val is True: return True
+            if val == 0 or val is False: return False
+            return state.get("round", 1) >= val + delay
+
+        unlocked = [upgrade_names[k] for k in upgrades if _is_upg_active(game_state, k) and k in upgrade_names]
+        researching = [upgrade_names[k] for k in upgrades if not _is_upg_active(game_state, k) and upgrades[k] and k in upgrade_names]
+        upgrade_line = f"科技已上線：{'、'.join(unlocked) if unlocked else '無'}　研發中：{'、'.join(researching) if researching else '無'}"
 
         expanded = game_state.get("expanded_cities", [])
         expansion_line = f"已擴張城市：{'、'.join(expanded) if expanded else '無'}"
