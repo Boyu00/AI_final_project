@@ -92,37 +92,135 @@ def strategy_distributed(state):
 
 
 def strategy_tech_then_harvest(state):
+    """先研發後收割（路線B）：買 dynamicPricing+aiRouting → 台中盾牌 → 高雄主攻。
+
+    路線B 的核心邏輯：
+    - 先研發（R1-R2）：買兩個升級（共 55萬），升級回合補台中 10萬維持盾牌
+    - 後收割（R3+）：台中 15萬（盾牌，確保競爭者持續打台中而非高雄）
+                      + 高雄 10萬（主攻，subsidy_mult=1.3 + aiRouting 加速）
+    - 高雄連續 ≥3 回合時重置（只補台中），讓高雄 consecutive 歸零恢復效率
+    - 比路線B_科技致富（strategy_route_b）多花 25萬在 dynamicPricing，
+      導致少 1 回合高雄攻勢，通關率略低（~30-40% vs ~44%）
+    """
     decisions = []
+    upgs = state.get("upgrades", {})
     r = state["round"]
-    min_rider = min(state["cities"][c]["rider_satisfaction"] for c in game.CITIES)
-    
-    # 決策 1：降抽成護外送員滿意度（避免外送荒）
+    min_rider = min(state["cities"][c]["rider_satisfaction"] for c in CITIES)
+
+    # 決策 1：降抽成護外送員
     if min_rider < 58 and state["commission_rate"] > game.COMMISSION_MIN:
         decisions.append({"type": "commission", "delta": -game.COMMISSION_STEP})
 
-    # 決策 2/3：購買科技
+    # 決策 2：買升級（dynamicPricing → aiRouting，研發期 2 回合）
     if len(decisions) < 2:
-        upgs = state.get("upgrades", {})
-        catalog = [
-            ("dynamicPricing", game.UPGRADE_DYNAMIC_PRICING_COST),
-            ("aiRouting", game.UPGRADE_AI_ROUTING_COST),
-            ("exclusiveMerchant", game.UPGRADE_EXCLUSIVE_MERCHANT_COST),
-        ]
-        # 依照順序買：動態定價 -> AI路徑 -> 獨家特約
-        for k, c in catalog:
-            if not upgs.get(k) and state["money"] >= c + 15: # 保留 15 萬安全水位
+        for k, c in [("dynamicPricing", game.UPGRADE_DYNAMIC_PRICING_COST),
+                     ("aiRouting",      game.UPGRADE_AI_ROUTING_COST)]:
+            if not upgs.get(k) and state["money"] >= c + 10:
                 decisions.append({"type": "upgrade", "upgradeType": k})
-                break
+                # 升級回合只剩一個決策槽：補台中 10萬維持盾牌
+                amt_tc = min(10, _money_cap(state, 10))
+                if amt_tc >= 5 and state["money"] >= c + amt_tc:
+                    decisions.append({"type": "subsidy", "city": "台中", "amount": amt_tc})
+                return decisions[:2]
 
-    # 決策 3/4：有剩餘行動點數時，進行投資
+    # 決策 3：收割期 - 台中盾牌 + 高雄主攻
     if len(decisions) < 2:
-        # Phase 2: 台中或台北投資
-        # 由於 AI路徑 加成補貼，我們在科技出關後重砸台北
-        target, budget = "台北", 25
-        amt = _money_cap(state, budget)
-        safety = 8 + 10
-        if amt >= 5 and state["money"] >= amt + safety:
-            decisions.append({"type": "subsidy", "city": target, "amount": amt})
+        ks_consec = state["cities"]["高雄"].get("consecutive_subsidy_count", 0)
+        final_round = (r == 10)
+
+        if final_round:
+            # 最終回合：全力衝高雄
+            amt_ks = _money_cap(state, 20)
+            amt_tc = 15
+            if state["money"] >= amt_ks + amt_tc:
+                decisions.append({"type": "subsidy", "city": "台中", "amount": amt_tc})
+                decisions.append({"type": "subsidy", "city": "高雄", "amount": amt_ks})
+            elif amt_ks >= 5 and state["money"] >= amt_ks:
+                decisions.append({"type": "subsidy", "city": "高雄", "amount": amt_ks})
+        elif ks_consec >= 3:
+            # 高雄重置回合：台中盾牌 + 台北消費者滿意度緩衝
+            amt_tc = _money_cap(state, 15)
+            amt_tp = 10
+            if state["money"] >= amt_tc + amt_tp + 5 and amt_tc >= 5:
+                decisions.append({"type": "subsidy", "city": "台中", "amount": amt_tc})
+                decisions.append({"type": "subsidy", "city": "台北", "amount": amt_tp})
+            elif amt_tc >= 5 and state["money"] >= amt_tc + 5:
+                decisions.append({"type": "subsidy", "city": "台中", "amount": amt_tc})
+        else:
+            # 一般回合：台中 15萬（盾牌）+ 高雄 10萬（主攻）
+            amt_tc = 15
+            amt_ks = _money_cap(state, 10)
+            if state["money"] >= amt_tc + amt_ks and amt_ks >= 5:
+                decisions.append({"type": "subsidy", "city": "台中", "amount": amt_tc})
+                decisions.append({"type": "subsidy", "city": "高雄", "amount": amt_ks})
+            elif amt_tc >= 5 and state["money"] >= amt_tc:
+                decisions.append({"type": "subsidy", "city": "台中", "amount": amt_tc})
+
+    return decisions[:2]
+
+
+def strategy_route_b(state):
+    """路線 B：科技致富（v3 盾牌版）
+
+    核心發現（CITIES = [台北, 台中, 高雄]，Rule 1 按序觸發）：
+    只要台中 ≥18%，競爭者 Rule 1 就先打台中，高雄得以自由累積。
+
+    Phase 1 (R1)：買 aiRouting（省 25萬不買 dynamicPricing）
+                  + 補台中 10萬建立早期盾牌
+    Phase 2 (R2-R4)：每輪補台中 15萬（維持盾牌）+ 補高雄 10萬（連續 3 輪）
+    Phase 3 (R5)：只補台中（跳過高雄，重置 consecutive_subsidy_count=0）
+    Phase 4 (R6-R8)：再補台中 15萬 + 高雄 10萬（連續 3 輪，效率全開）
+    Phase 5 (R9)：只補台中（再次重置）
+    Phase 6 (R10)：高雄 25萬 + 台中 15萬（全力衝刺，台中擋最後一波反撲）
+
+    不降抽成（保持 0.30 收入）、只買一個升級（保留資金給補貼）。
+    台中連續遞減後期只剩 25% 效率，但 15萬仍給 6.6%，足以維持盾牌 ≥18%。
+    """
+    upgrades = state["upgrades"]
+    r = state["round"]
+    decisions = []
+
+    # Phase 1：買 aiRouting + 補台中開盾
+    if not upgrades.get("aiRouting") and state["money"] >= game.UPGRADE_AI_ROUTING_COST + 10:
+        decisions.append({"type": "upgrade", "upgradeType": "aiRouting"})
+        amt_tc = _money_cap(state, 10)
+        if amt_tc >= 5 and state["money"] >= game.UPGRADE_AI_ROUTING_COST + amt_tc:
+            decisions.append({"type": "subsidy", "city": "台中", "amount": amt_tc})
+        return decisions[:2]
+
+    # Phase 2-6：盾牌 + 主攻
+    # 重置回合：R5, R9（只補台中，讓高雄 consecutive 歸零）
+    reset_round = (r == 5 or r == 9)
+    # 最後衝刺：R10 全力
+    final_round = (r == 10)
+
+    if reset_round:
+        # 只補台中，高雄 consecutive 自動歸零
+        # R5 額外降抽成一次（0.30→0.25）護台北外送員滿意度，否則台北累積衰減拉低全局 rider_sat
+        if r == 5 and state["commission_rate"] > game.COMMISSION_MIN:
+            decisions.append({"type": "commission", "delta": -game.COMMISSION_STEP})
+        amt = _money_cap(state, 25)
+        if amt >= 5 and state["money"] >= amt:
+            decisions.append({"type": "subsidy", "city": "台中", "amount": amt})
+    elif final_round:
+        # R10：全力衝高雄 + 台中擋最後反撲
+        amt_ks = _money_cap(state, 25)
+        amt_tc = 15
+        if state["money"] >= amt_ks + amt_tc:
+            decisions.append({"type": "subsidy", "city": "高雄", "amount": amt_ks})
+            decisions.append({"type": "subsidy", "city": "台中", "amount": amt_tc})
+        elif state["money"] >= amt_ks:
+            decisions.append({"type": "subsidy", "city": "高雄", "amount": amt_ks})
+    else:
+        # 一般回合：台中 15萬（盾牌）+ 高雄 10萬（主攻）
+        amt_tc = min(15, _money_cap(state, 15))
+        amt_ks = _money_cap(state, 10)
+        total = amt_tc + amt_ks
+        if state["money"] >= total and amt_ks >= 5 and amt_tc >= 5:
+            decisions.append({"type": "subsidy", "city": "高雄", "amount": amt_ks})
+            decisions.append({"type": "subsidy", "city": "台中", "amount": amt_tc})
+        elif state["money"] >= amt_ks and amt_ks >= 5:
+            decisions.append({"type": "subsidy", "city": "高雄", "amount": amt_ks})
 
     return decisions[:2]
 
@@ -193,11 +291,12 @@ def strategy_share_plus_sat(state):
 
 
 def strategy_brand_route_c(state):
-    """路線 C 品牌正向循環（挑戰模式）：台中品牌投資 → 正向循環 + 補貼衝市占。
+    """路線 C 品牌正向循環（挑戰模式）：台中品牌投資 → 台中飛輪盾牌 + 高雄主攻。
 
-    Phase 1 (r1-2): 台中品牌經營（建立 brand_count=2 + consumer_sat≥75，觸發正向循環 +7.5%/回合）
-    Phase 2 (r3+):  台中 30萬補貼（正向循環 +7.5%/回合 + 補貼，連續≥2 時穿插台北重置）
-    全程: min_rider < 58 → 降抽成
+    Phase 1 (r1-2): 台中品牌經營（brand_count=2 + consumer_sat≥75，啟動飛輪 +7.5%/回合）
+    Phase 2 (r3+):  台中 15萬（飛輪盾牌）+ 高雄 15萬（subsidy_mult 1.3 主攻）
+                    高雄連續 ≥3 回合時穿插台中 20萬單獨重置
+    差異於路線B：不買科技升級，靠品牌飛輪免費加成台中守城。
     """
     decisions = []
     r         = state["round"]
@@ -216,44 +315,117 @@ def strategy_brand_route_c(state):
 
         if r <= 2 and not flywheel_ready and state["config"].get("brand_management_enabled"):
             # Phase 1：台中品牌投資
-            safety = 8 + 10
-            if state["money"] >= game.BRAND_MGMT_COST + safety:
+            if state["money"] >= game.BRAND_MGMT_COST + 10:
                 decisions.append({"type": "brand_management", "city": "台中"})
         else:
-            # Phase 2：台中補貼衝刺，連續 ≥2 且非最後回合則穿插台北重置
-            tc_consec = state["cities"]["台中"].get("consecutive_subsidy_count", 0)
-            if tc_consec >= 2 and r < 10:
-                target, budget = "台北", 10   # 重置台中 consecutive → 下回合恢復 100% 效率
-            else:
-                target, budget = "台中", 30   # 正常衝刺
+            # Phase 2：台中飛輪盾牌 15萬 + 高雄主攻 15萬
+            ks_consec = state["cities"]["高雄"].get("consecutive_subsidy_count", 0)
 
-            amt    = _money_cap(state, budget)
-            safety = 8 + 10
-            if amt >= 5 and state["money"] >= amt + safety:
-                decisions.append({"type": "subsidy", "city": target, "amount": amt})
+            if ks_consec >= 3 and r < 10:
+                # 高雄重置：台中飛輪盾牌 + 台北消費者滿意度緩衝
+                amt_tc = _money_cap(state, 15)
+                amt_tp = 10
+                if state["money"] >= amt_tc + amt_tp + 5 and amt_tc >= 5:
+                    decisions.append({"type": "subsidy", "city": "台中", "amount": amt_tc})
+                    decisions.append({"type": "subsidy", "city": "台北", "amount": amt_tp})
+                elif amt_tc >= 5 and state["money"] >= amt_tc + 5:
+                    decisions.append({"type": "subsidy", "city": "台中", "amount": amt_tc})
+            else:
+                # 台中 15萬（飛輪盾牌）+ 高雄 15萬（主攻）
+                amt_tc = 15
+                amt_ks = _money_cap(state, 15)
+                if state["money"] >= amt_tc + amt_ks + 5 and amt_ks >= 5:
+                    decisions.append({"type": "subsidy", "city": "台中", "amount": amt_tc})
+                    decisions.append({"type": "subsidy", "city": "高雄", "amount": amt_ks})
+                elif amt_tc >= 5 and state["money"] >= amt_tc + 5:
+                    decisions.append({"type": "subsidy", "city": "台中", "amount": amt_tc})
 
     return decisions[:2]
 
 
+def strategy_route_a(state):
+    """路線 A：市占主導（challenge 模式）- dynamicPricing 效率 + 台中主攻 + 台北消費者基礎。
+
+    買 dynamicPricing（25萬，R1），讓台中份額 <35% 時補貼效率 ×1.5，搶佔市占。
+    與路線B的差異：
+    - 路線A：dynamicPricing + 台中主攻（市場規模大、帶動消費者滿意度），台北輔助
+    - 路線B：aiRouting+dynamicPricing + 高雄主攻（subsidy_mult 1.3）+ 台中盾牌
+    台中連續 ≥3 回合遞減時重置台北（避免台北消費者滿意度崩盤）。
+    """
+    decisions = []
+    upgs = state.get("upgrades", {})
+    min_rider = min(state["cities"][c]["rider_satisfaction"] for c in CITIES)
+
+    # 降抽成護外送員（優先）
+    if min_rider < 58 and state["commission_rate"] > game.COMMISSION_MIN:
+        decisions.append({"type": "commission", "delta": -game.COMMISSION_STEP})
+
+    if len(decisions) < 2:
+        # 買 dynamicPricing（補貼效率加成，只買一次）
+        if not upgs.get("dynamicPricing") and state["money"] >= game.UPGRADE_DYNAMIC_PRICING_COST + 10:
+            decisions.append({"type": "upgrade", "upgradeType": "dynamicPricing"})
+            amt_tc = min(10, _money_cap(state, 10))
+            if amt_tc >= 5 and state["money"] >= game.UPGRADE_DYNAMIC_PRICING_COST + amt_tc:
+                decisions.append({"type": "subsidy", "city": "台中", "amount": amt_tc})
+            return decisions[:2]
+
+        tc_consec = state["cities"]["台中"].get("consecutive_subsidy_count", 0)
+
+        if tc_consec >= 3:
+            # 重置：台北補貼維持消費者滿意度，台中 consecutive 歸零
+            amt_tp = _money_cap(state, 25)
+            if amt_tp >= 5 and state["money"] >= amt_tp + 5:
+                decisions.append({"type": "subsidy", "city": "台北", "amount": amt_tp})
+        else:
+            # 台中 18萬主攻（dynamicPricing 加成）+ 台北 10萬消費者基礎
+            amt_tc = _money_cap(state, 18)
+            amt_tp = 10
+            if state["money"] >= amt_tc + amt_tp + 5 and amt_tc >= 5:
+                decisions.append({"type": "subsidy", "city": "台中", "amount": amt_tc})
+                decisions.append({"type": "subsidy", "city": "台北", "amount": amt_tp})
+            elif amt_tc >= 5 and state["money"] >= amt_tc + 5:
+                decisions.append({"type": "subsidy", "city": "台中", "amount": amt_tc})
+
+    return decisions[:2]
+
+
+def strategy_route_d(state):
+    """路線 D：併購終結（challenge 模式）
+
+    同路線 A，但全程監測：若對手資金 ≤ 門檻且自身資金充足則立即收購。
+    """
+    comp_money = state.get("competitor_money", 999)
+    if (state["config"].get("acquisition_enabled")
+            and comp_money <= game.ACQUISITION_THRESHOLD
+            and state["money"] >= game.ACQUISITION_COST):
+        return [{"type": "acquisition"}]
+    return strategy_route_a(state)
+
+
 STRATEGIES = {
-    "純隨機":       strategy_random,
-    "單城集中":     strategy_single_city("台北"),
-    "分散投資":     strategy_distributed,
-    "先研發後收割":  strategy_tech_then_harvest,
-    "圍剿對手":     strategy_siege("台北"),
-    "兼顧滿意度":   strategy_balanced,
-    "市占+滿意度":  strategy_share_plus_sat,
+    "純隨機":            strategy_random,
+    "單城集中":          strategy_single_city("台北"),
+    "分散投資":          strategy_distributed,
+    "先研發後收割":       strategy_tech_then_harvest,
+    "路線A_市占主導":     strategy_route_a,
+    "路線B_科技致富":     strategy_route_b,
+    "圍剿對手":          strategy_siege("台北"),
+    "兼顧滿意度":        strategy_balanced,
+    "市占+滿意度":       strategy_share_plus_sat,
     "品牌正向循環(路線C)": strategy_brand_route_c,
+    "路線D_併購終結":     strategy_route_d,
 }
 
 
 # ── 模擬執行器 ──────────────────────────────────────────────────────────────
 
-def run_one_game(decision_fn, initial_money=120.0, max_rounds=10):
-    state = game.init_game_state(initial_money=initial_money)
+def run_one_game(decision_fn, initial_money=120.0, max_rounds=10, difficulty="challenge"):
+    state = game.init_game_state(initial_money=initial_money, difficulty=difficulty)
     state["max_rounds"] = max_rounds
     bankrupt_round = None
     for r in range(1, max_rounds + 1):
+        if state["config"]["black_swan"]:
+            game._roll_swan_event(state)
         decisions = decision_fn(state)
         # 預算保險：若策略不小心超支，砍到買得起為止（模擬 UI 擋下超支）
         total_spend = 0.0
